@@ -1,17 +1,16 @@
 // Bubble: grow your bubble, digest with proof of work, claim an RLN membership.
 //
-// The game runs here, in sim.js (the same file bubble_core embeds to check a finished game).
-// bubble_core gives each game its seed and finds the digestion proofs of work in the background;
-// this view asks for them every half second and applies each one when the stomach holds a chunk.
+// A thin view. bubble_core runs the game (rules, loop, record, proof of work, check); this view
+// only steers and draws. While a game is on it asks for a frame about 30 times a second
+// (one call in flight at a time): it sends where the pointer is and gets back the visible world
+// in view pixels. When it stops asking (hidden, closed), the core pauses the game.
 // Every core call goes through callVia (logos.callModuleAsync; never a blocking call in a view).
-// The 30 Hz loop runs only while a game is being played.
 
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import Logos.Theme
 import Logos.Controls
-import "sim.js" as Sim
 
 Item {
     id: root
@@ -52,109 +51,79 @@ Item {
     }
 
     // ── state
-    property string screen: "start"     // start | starting | play | checking | won | lost
+    property string screen: "start"     // start | starting | play | checking | won | over
     property string message: ""
-    property var info: null             // newGame's reply: gameId, seed, params, pow, chunks, threads
-    property var game: null             // sim.js state
-    property var rec: null              // sim.js recorder
-    property var found: ({})            // chunk -> nonce, from the core
-    property int foundCount: 0
-    property real hashRate: 0
-    property var checkResult: null
-    property int dir: 64                // Sim.STOP
+    property var info: null             // newGame's reply: gameId, params, pow, chunks, threads
+    property var fr: null               // the last frame
+    property bool inFlight: false
     property real mouseX: -1
     property real mouseY: -1
     property var keys: ({})
-    property int frame: 0               // bumps every tick, for the HUD bindings
     property bool autopilot: false      // tests only (the harness sets it): head for the nearest dot
-    readonly property bool playing: root.screen === "play"
-    readonly property bool paused: root.playing && !root.activeNow
+    readonly property bool playing: root.screen === "play" || root.screen === "checking"
     readonly property bool activeNow: Qt.application.state === Qt.ApplicationActive && root.visible
 
     function startGame() {
-        root.screen = "starting"; root.message = ""
+        root.screen = "starting"; root.message = ""; root.fr = null
         callVia("newGame", ["{}"], function (raw) {
             var r = root.parse(raw)
             if (!r || !r.ok) { root.screen = "start"; root.message = (r && r.error) || "bubble_core did not answer."; return }
             root.info = r
-            root.game = Sim.newGame(r.seed, r.params)
-            root.rec = Sim.newRecorder()
-            root.found = ({}); root.foundCount = 0; root.hashRate = 0; root.checkResult = null
-            root.dir = 64
             root.screen = "play"
             root.forceActiveFocus()
         })
     }
 
-    function poll() {
-        if (!root.info) return
-        callVia("progress", [root.info.gameId], function (raw) {
-            var r = root.parse(raw)
-            if (!r || !r.ok) return
-            var f = ({})
-            for (var i = 0; i < r.found.length; i++) f[r.found[i][0]] = r.found[i][1]
-            root.found = f; root.foundCount = r.found.length; root.hashRate = r.hashRate || 0
-            if (root.screen === "checking" && r.check && r.check.state === "done") {
-                root.checkResult = r.check.result
-                root.screen = (r.check.result && r.check.result.ok) ? "won" : "lost"
-                if (!(r.check.result && r.check.result.ok)) root.message = "The check refused the game: " + ((r.check.result && r.check.result.reason) || "no reason given")
+    function giveUp() {
+        if (!root.info || root.screen !== "play") return
+        callVia("abandon", [root.info.gameId], null)
+        root.screen = "over"; root.message = "You gave up."
+    }
+
+    // Where to head, in px from the middle of the view.
+    function steer() {
+        if (root.autopilot && root.fr) {
+            var p = root.fr.pellets, best = -1, bd = 1e12, cx = board.width / 2, cy = board.height / 2
+            for (var i = 0; i < p.length; i += 3) {
+                var dd = Math.abs(p[i] - cx) + Math.abs(p[i + 1] - cy)
+                if (dd < bd) { bd = dd; best = i }
+            }
+            return best < 0 ? [0, 0] : [p[best] - cx, p[best + 1] - cy]
+        }
+        var kx = (root.keys.right ? 1 : 0) - (root.keys.left ? 1 : 0), ky = (root.keys.down ? 1 : 0) - (root.keys.up ? 1 : 0)
+        if (kx !== 0 || ky !== 0) return [kx * 400, ky * 400]
+        if (root.mouseX < 0) return root._lastSteer
+        return [root.mouseX - board.width / 2, root.mouseY - board.height / 2]
+    }
+    property var _lastSteer: [0, 0]
+
+    function pump() {
+        if (root.inFlight || !root.info) return
+        var st = steer(); root._lastSteer = st
+        root.inFlight = true
+        callVia("frame", [root.info.gameId, Math.round(st[0]), Math.round(st[1]), JSON.stringify({ w: Math.round(board.width), h: Math.round(board.height) })], function (raw) {
+            root.inFlight = false
+            var f = root.parse(raw)
+            if (!f || !f.ok) return
+            root.fr = f
+            board.requestPaint()
+            if (f.over && root.screen === "play") {
+                if (f.won) root.screen = "checking"
+                else { root.screen = "over"; root.message = f.why === "time" ? "Out of time." : ("The game stopped: " + f.why) }
+            }
+            if (root.screen === "checking" && f.check && f.check.state === "done") {
+                root.screen = f.check.result && f.check.result.ok ? "won" : "over"
+                if (!(f.check.result && f.check.result.ok)) root.message = "The check refused the game: " + ((f.check.result && f.check.result.reason) || "no reason given")
             }
         })
     }
 
-    // The heading from the mouse (relative to the player in the middle) or the arrow keys / WASD.
-    function heading() {
-        if (root.autopilot) {
-            var me = root.game.me, best = null, bd = 1e18
-            for (var i = 0; i < root.game.pellets.length; i++) {
-                var p = root.game.pellets[i], dd = Math.abs(p.x - me.x) + Math.abs(p.y - me.y)
-                if (dd < bd) { bd = dd; best = p }
-            }
-            return best ? Sim.dirOf(best.x - me.x, best.y - me.y) : 64
-        }
-        var kx = (root.keys.right ? 1 : 0) - (root.keys.left ? 1 : 0), ky = (root.keys.down ? 1 : 0) - (root.keys.up ? 1 : 0)
-        if (kx !== 0 || ky !== 0) return Sim.dirOf(kx, ky)
-        if (root.mouseX < 0) return root.dir
-        var dx = root.mouseX - board.width / 2, dy = root.mouseY - board.height / 2
-        var rPx = Sim.radius(Sim.mass(root.game.me)) / Sim.U * board.scale
-        if (dx * dx + dy * dy < rPx * rPx * 0.25) return 64
-        return Sim.dirOf(Math.round(dx * 1000), Math.round(dy * 1000))
+    Timer { interval: 33; repeat: true; running: root.playing && root.activeNow; onTriggered: root.pump() }
+
+    Keys.onPressed: function (e) {
+        if (e.key === Qt.Key_Escape) { root.giveUp(); return }
+        root.setKey(e.key, true)
     }
-
-    function tick() {
-        var g = root.game
-        if (!g || g.over) return
-        var d = heading()
-        // Digest every chunk whose proof has arrived, while the stomach holds a chunk.
-        var dig = [], need = Sim.chunksNeeded(g.p)
-        for (var k = g.chunks; k < need && root.found[k] !== undefined && g.me.stomach >= g.p.chunk * (dig.length + 1); k++)
-            dig.push([k, root.found[k]])
-        Sim.record(root.rec, g.tick, d, dig)
-        var err = Sim.step(g, d, dig.map(function (x) { return x[0] }))
-        root.dir = d
-        if (err) { root.message = "Game error: " + err; root.screen = "lost"; return }
-        root.frame++
-        board.requestPaint()
-        if (g.over) finishGame()
-    }
-
-    function finishGame() {
-        var g = root.game
-        if (!g.won) {
-            root.message = g.why === "time" ? "Out of time." : "You gave up."
-            root.screen = "lost"
-            callVia("abandon", [root.info.gameId], null)
-            return
-        }
-        var r = { v: Sim.SIM_VERSION, seed: root.info.seed, inputs: root.rec.inputs, digests: root.rec.digests, end: g.tick }
-        root.screen = "checking"
-        callVia("finish", [root.info.gameId, JSON.stringify(r)], null)
-    }
-
-    Timer { interval: 33; repeat: true; running: root.playing && root.activeNow; onTriggered: root.tick() }
-    Timer { interval: 500; repeat: true; running: root.playing || root.screen === "checking"; onTriggered: root.poll() }
-
-    Keys.onPressed: function (e) { root.setKey(e.key, true) }
     Keys.onReleased: function (e) { if (!e.isAutoRepeat) root.setKey(e.key, false) }
     function setKey(k, down) {
         var n = null
@@ -168,70 +137,67 @@ Item {
 
     Rectangle { anchors.fill: parent; color: root.cBg }
 
-    // ── the board
+    // ── the board: draws the last frame as the core sent it
     Canvas {
         id: board
         anchors.fill: parent
-        visible: root.game !== null && root.screen !== "start" && root.screen !== "starting"
+        visible: root.fr !== null
         renderStrategy: Canvas.Cooperative
-        // px per world px: zoom out as the bubble grows.
-        property real scale: (root.game && root.frame >= 0) ? Math.min(1.4, height / (700 + 7 * Sim.radius(Sim.mass(root.game.me)) / Sim.U)) : 1
         onPaint: {
-            var ctx = getContext("2d"), g = root.game
+            var ctx = getContext("2d"), f = root.fr
             ctx.fillStyle = root.cBg; ctx.fillRect(0, 0, width, height)
-            if (!g) return
-            var s = scale / Sim.U, cx = width / 2 - g.me.x * s, cy = height / 2 - g.me.y * s
-            // Grid every 100 px and the world's edge.
+            if (!f) return
+            // Grid and the world's edge: world = [x, y, size, grid step] in view px.
+            var wx = f.world[0], wy = f.world[1], ws = f.world[2], step = f.world[3]
             ctx.strokeStyle = root.cLine; ctx.lineWidth = 1; ctx.beginPath()
-            var step = 100 * Sim.U, W = Sim.WORLD
-            var x0 = Math.max(0, Math.floor((-cx / s) / step) * step), x1 = Math.min(W, (width - cx) / s)
-            var y0 = Math.max(0, Math.floor((-cy / s) / step) * step), y1 = Math.min(W, (height - cy) / s)
-            for (var x = x0; x <= x1; x += step) { ctx.moveTo(cx + x * s, cy + Math.max(0, y0) * s); ctx.lineTo(cx + x * s, cy + y1 * s) }
-            for (var y = y0; y <= y1; y += step) { ctx.moveTo(cx + Math.max(0, x0) * s, cy + y * s); ctx.lineTo(cx + x1 * s, cy + y * s) }
+            var gx0 = Math.max(wx, wx + Math.ceil(-wx / step) * step), gx1 = Math.min(width, wx + ws)
+            var gy0 = Math.max(wy, wy + Math.ceil(-wy / step) * step), gy1 = Math.min(height, wy + ws)
+            var top = Math.max(0, wy), bottom = Math.min(height, wy + ws), left = Math.max(0, wx), right = Math.min(width, wx + ws)
+            for (var x = gx0; x <= gx1; x += step) { ctx.moveTo(x, top); ctx.lineTo(x, bottom) }
+            for (var y = gy0; y <= gy1; y += step) { ctx.moveTo(left, y); ctx.lineTo(right, y) }
             ctx.stroke()
-            ctx.strokeStyle = root.cFaint; ctx.lineWidth = 3; ctx.strokeRect(cx, cy, W * s, W * s)
-            // Pellets.
-            for (var i = 0; i < g.pellets.length; i++) {
-                var p = g.pellets[i], px = cx + p.x * s, py = cy + p.y * s
-                if (px < -5 || py < -5 || px > width + 5 || py > height + 5) continue
-                ctx.fillStyle = root.bubbleColours[i % root.bubbleColours.length]
-                ctx.beginPath(); ctx.arc(px, py, Math.max(2, 3 * scale), 0, 2 * Math.PI); ctx.fill()
+            ctx.strokeStyle = root.cFaint; ctx.lineWidth = 3; ctx.strokeRect(wx, wy, ws, ws)
+            // Dots: flat [x, y, colour, …].
+            var pr = Math.max(2, 3 * f.scale), p = f.pellets
+            for (var i = 0; i < p.length; i += 3) {
+                ctx.fillStyle = root.bubbleColours[p[i + 2]]
+                ctx.beginPath(); ctx.arc(p[i], p[i + 1], pr, 0, 2 * Math.PI); ctx.fill()
             }
-            // Bubbles: the dangerous ones get a red ring.
-            var mm = Sim.mass(g.me)
-            for (var j = 0; j < g.bots.length; j++) {
-                var b = g.bots[j], r = Sim.radius(b.mass) * s, bx = cx + b.x * s, by = cy + b.y * s
-                if (bx < -r || by < -r || bx > width + r || by > height + r) continue
+            // Bubbles: [x, y, r, colour, dangerous]; the dangerous ones get a red ring.
+            for (var j = 0; j < f.bots.length; j++) {
+                var b = f.bots[j]
                 ctx.globalAlpha = 0.85
-                ctx.fillStyle = root.bubbleColours[j % root.bubbleColours.length]
-                ctx.beginPath(); ctx.arc(bx, by, r, 0, 2 * Math.PI); ctx.fill()
+                ctx.fillStyle = root.bubbleColours[b[3] % root.bubbleColours.length]
+                ctx.beginPath(); ctx.arc(b[0], b[1], b[2], 0, 2 * Math.PI); ctx.fill()
                 ctx.globalAlpha = 1
-                if (b.mass * 10 >= mm * 11) { ctx.strokeStyle = root.cBad; ctx.lineWidth = 3; ctx.stroke() }
+                if (b[4]) { ctx.strokeStyle = root.cBad; ctx.lineWidth = 3; ctx.stroke() }
             }
-            // The player: the body, and the stomach as a lighter core still to digest.
-            var rm = Sim.radius(mm) * s
+            // The player in the middle: the body, the stomach as a lighter core, the shield as a ring.
+            var me = f.me, cx = width / 2, cy = height / 2
             ctx.fillStyle = root.cAccent
-            ctx.beginPath(); ctx.arc(width / 2, height / 2, rm, 0, 2 * Math.PI); ctx.fill()
-            if (g.me.shield > 0) { ctx.strokeStyle = "#ffffff"; ctx.globalAlpha = 0.6; ctx.lineWidth = 3
-                ctx.beginPath(); ctx.arc(width / 2, height / 2, rm + 5, 0, 2 * Math.PI); ctx.stroke(); ctx.globalAlpha = 1 }
-            if (g.me.stomach > 0) {
+            ctx.beginPath(); ctx.arc(cx, cy, me.r, 0, 2 * Math.PI); ctx.fill()
+            if (me.stomachR > 0) {
                 ctx.fillStyle = "#ffd3b8"; ctx.globalAlpha = 0.75
-                ctx.beginPath(); ctx.arc(width / 2, height / 2, rm * Math.sqrt(g.me.stomach / mm), 0, 2 * Math.PI); ctx.fill()
+                ctx.beginPath(); ctx.arc(cx, cy, me.stomachR, 0, 2 * Math.PI); ctx.fill()
                 ctx.globalAlpha = 1
+            }
+            if (me.shield) {
+                ctx.strokeStyle = "#ffffff"; ctx.globalAlpha = 0.6; ctx.lineWidth = 3
+                ctx.beginPath(); ctx.arc(cx, cy, me.r + 5, 0, 2 * Math.PI); ctx.stroke(); ctx.globalAlpha = 1
             }
         }
         MouseArea {
             anchors.fill: parent
             hoverEnabled: true
-            enabled: root.playing
+            enabled: root.screen === "play"
             onPositionChanged: function (m) { root.mouseX = m.x; root.mouseY = m.y }
             onExited: { root.mouseX = -1 }
         }
     }
 
-    // ── HUD while playing
+    // ── HUD
     Rectangle {
-        visible: root.screen === "play" || root.screen === "checking"
+        visible: root.fr !== null && (root.screen === "play" || root.screen === "checking")
         anchors { left: parent.left; top: parent.top; margins: 16 }
         width: 300; height: hud.implicitHeight + 24; radius: 10
         color: root.cSurface; opacity: 0.92; border.color: root.cLine
@@ -239,22 +205,21 @@ Item {
             id: hud
             anchors { fill: parent; margins: 12 }
             spacing: 6
-            property int f: root.frame
-            readonly property var me: (root.game && hud.f >= 0) ? root.game.me : null
-            readonly property int need: root.game ? Sim.chunksNeeded(root.game.p) : 1
-            Text { color: root.cText; font.pixelSize: 15; font.bold: true
-                text: hud.me ? ("Size " + hud.me.body + " / " + root.game.p.goal) : "" }
+            readonly property var me: root.fr ? root.fr.me : null
+            readonly property var proofs: root.fr ? root.fr.proofs : null
+            Text { color: root.cText; font.pixelSize: 15; font.bold: true; text: hud.me ? ("Size " + hud.me.body + " / " + hud.me.goal) : "" }
             Rectangle { Layout.fillWidth: true; height: 8; radius: 4; color: root.cRaised
                 Rectangle { height: parent.height; radius: 4; color: root.cAccent
-                    width: hud.me ? parent.width * Math.min(1, (hud.me.body - root.game.p.start) / (root.game.p.goal - root.game.p.start)) : 0 } }
+                    width: hud.me ? parent.width * Math.min(1, (hud.me.body - hud.me.start) / (hud.me.goal - hud.me.start)) : 0 } }
             Text { color: root.cSub; font.pixelSize: 13
-                text: hud.me ? ("In the stomach: " + hud.me.stomach + (hud.me.stomach >= root.game.p.chunk && root.found[root.game.chunks] === undefined ? "  (digesting…)" : "")) : "" }
+                text: hud.me ? ("In the stomach: " + hud.me.stomach + (hud.me.digesting ? "  (digesting…)" : "")) : "" }
             Text { color: root.cSub; font.pixelSize: 13
-                text: "Digestion proofs: " + root.foundCount + " / " + hud.need + "  ·  " + Math.round(root.hashRate) + " hashes/s" }
+                text: hud.proofs ? ("Digestion proofs: " + hud.proofs.found + " / " + hud.proofs.need + (hud.proofs.found < hud.proofs.need ? "  ·  " + Math.round(hud.proofs.hashRate) + " hashes/s" : "")) : "" }
             Rectangle { Layout.fillWidth: true; height: 6; radius: 3; color: root.cRaised
-                Rectangle { height: parent.height; radius: 3; color: root.cOk; width: parent.width * Math.min(1, root.foundCount / hud.need) } }
+                Rectangle { height: parent.height; radius: 3; color: root.cOk; width: hud.proofs ? parent.width * Math.min(1, hud.proofs.found / hud.proofs.need) : 0 } }
             Text { color: root.cFaint; font.pixelSize: 12
-                text: root.game ? ((hud.me && hud.me.shield > 0 && root.game.deaths > 0 ? "Eaten! Your digested size is safe.  ·  " : "") + Math.floor(root.game.tick / 30 / 60) + ":" + ("0" + Math.floor(root.game.tick / 30) % 60).slice(-2) + (hud.f >= 0 && root.paused ? "  ·  paused" : "")) : "" }
+                text: root.fr ? ((root.fr.me.shield && root.fr.me.deaths > 0 ? "Eaten! Your digested size is safe.  ·  " : "")
+                    + Math.floor(root.fr.seconds / 60) + ":" + ("0" + Math.floor(root.fr.seconds) % 60).slice(-2)) : "" }
         }
     }
     Text {
@@ -263,9 +228,8 @@ Item {
         color: root.cFaint; font.pixelSize: 12
         text: "Steer with the mouse or the arrow keys · Esc gives up"
     }
-    Keys.onEscapePressed: { if (root.playing) { root.game.over = true; root.game.why = "gave up"; root.finishGame(); root.message = "You gave up." } }
 
-    // ── cards: start, checking, won, lost
+    // ── cards: start, checking, won, over
     Rectangle {
         visible: root.screen !== "play"
         anchors.fill: parent
@@ -279,11 +243,11 @@ Item {
                 anchors { fill: parent; margins: 24 }
                 spacing: 14
                 Text { Layout.fillWidth: true; color: root.cText; font.pixelSize: 26; font.bold: true; wrapMode: Text.Wrap
-                    text: root.screen === "won" ? "You made it!" : root.screen === "lost" ? "Game over" : root.screen === "checking" ? "Checking your game…" : "Bubble" }
+                    text: root.screen === "won" ? "You made it!" : root.screen === "over" ? "Game over" : root.screen === "checking" ? "Checking your game…" : "Bubble" }
                 Text {
                     Layout.fillWidth: true; color: root.cSub; font.pixelSize: 14; wrapMode: Text.Wrap; textFormat: Text.StyledText
                     visible: root.screen === "start" || root.screen === "starting"
-                    text: "Grow from a small bubble to size <b>" + (root.info ? root.info.params.goal : 300) + "</b>. Eat the dots and anything at least 10% smaller than you; "
+                    text: "Grow from a small bubble to the goal size. Eat the dots and anything at least 10% smaller than you; "
                         + "keep away from bubbles with a <font color='" + root.cBad + "'>red ring</font>. If one eats you, you lose only what you have not digested yet.<br><br>"
                         + "What you eat goes to your stomach first. Your computer <b>digests</b> it by solving small proofs of work, so you grow only as fast as it can work. "
                         + "Reach the goal and the game, with its proofs, becomes your ticket for an <b>RLN membership</b>: your right to send messages on Logos Messaging."
@@ -291,16 +255,17 @@ Item {
                 Text {
                     Layout.fillWidth: true; color: root.cSub; font.pixelSize: 14; wrapMode: Text.Wrap
                     visible: root.screen === "checking"
-                    text: "Replaying your " + ((root.game && root.frame >= 0) ? Math.round(root.game.tick / 30) : 0) + " s game and checking every proof of work, the way the membership gifter will."
+                    text: "Replaying your " + (root.fr ? Math.round(root.fr.seconds) : 0) + " s game and checking every proof of work, the way the membership gifter will."
                 }
                 Text {
                     Layout.fillWidth: true; color: root.cSub; font.pixelSize: 14; wrapMode: Text.Wrap
                     visible: root.screen === "won"
-                    text: root.checkResult ? ("Size " + root.checkResult.body + " in " + Math.round(root.checkResult.ticks / 30) + " s, " + root.checkResult.chunks
-                        + " proofs of work, all checked" + (root.checkResult.deaths ? (", eaten " + root.checkResult.deaths + "×") : "") + ". Claiming the membership arrives in the next version; your game is ready for it.") : ""
+                    readonly property var r: root.fr && root.fr.check ? root.fr.check.result : null
+                    text: r ? ("Size " + r.body + " in " + Math.round(r.ticks / 30) + " s, " + r.chunks + " proofs of work, all checked"
+                        + (r.deaths ? (", eaten " + r.deaths + "×") : "") + ". Claiming the membership arrives in the next version; your game is ready for it.") : ""
                 }
                 Text {
-                    Layout.fillWidth: true; color: root.screen === "lost" ? root.cSub : root.cBad; font.pixelSize: 14; wrapMode: Text.Wrap
+                    Layout.fillWidth: true; color: root.screen === "over" ? root.cSub : root.cBad; font.pixelSize: 14; wrapMode: Text.Wrap
                     visible: root.message !== ""
                     text: root.message
                 }
@@ -311,7 +276,6 @@ Item {
                         enabled: root.screen !== "starting" && root.screen !== "checking"
                         onClicked: root.startGame()
                     }
-                    Text { color: root.cFaint; font.pixelSize: 12; visible: !!root.info && root.screen === "start"; text: root.info ? (root.info.threads + " threads digest") : "" }
                 }
             }
         }

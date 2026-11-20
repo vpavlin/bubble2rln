@@ -6,14 +6,13 @@
   "type": "core",
   "interface": "universal",
   "category": "games",
-  "description": "Grow your bubble, digest with proof of work, and claim an RLN membership: the game rules, the digestion workers and the check of a finished game",
+  "description": "Grow your bubble, digest with proof of work, and claim an RLN membership: the game itself (rules, loop, record), the digestion workers and the check of a finished game",
   "main": "bubble_core_plugin",
   "dependencies": [],
   "nix": {
     "packages": {
       "build": [
-        "libsodium",
-        "qt6.qtdeclarative"
+        "libsodium"
       ],
       "runtime": [
         "libsodium"

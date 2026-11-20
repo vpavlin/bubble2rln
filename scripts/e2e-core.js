@@ -1,41 +1,38 @@
-// Headless test of bubble_core through logosctl: new game -> the bot plays that seed -> wait for
-// every digestion nonce -> finish -> the check passes. Then a tampered record must fail.
-// usage: node e2e-core.js SESSION   (the session's daemon has bubble_core loaded)
+// Headless test of bubble_core through logosctl: new game -> steer to the nearest dot through
+// frame() until the goal -> the core's own check passes -> tampered copies of the record fail.
+// Start the session's daemon with a short game and a slow-driver pause, e.g.
+//   BUBBLE_GOAL=40 BUBBLE_MIN_TICKS=300 BUBBLE_POW_BITS=6 BUBBLE_PAUSE_MS=5000
+// usage: node e2e-core.js SESSION
 const { execFileSync } = require("child_process");
-const S = require("../core/src/sim.js"), B = require("../sim/bot.js");
 const sess = process.argv[2] || "bubble";
 function call(method, ...args) {
-    const out = execFileSync(process.env.HOME + "/port-0.3/ctl.sh", [sess, "-j", "call", "bubble_core", method, ...args.map(a => "str:" + a)], { encoding: "utf8", maxBuffer: 1 << 26 });
+    const out = execFileSync(process.env.HOME + "/port-0.3/ctl.sh", [sess, "-j", "call", "bubble_core", method, ...args], { encoding: "utf8", maxBuffer: 1 << 26 });
     const o = JSON.parse(out.trim().split("\n").pop());
     if (o.status !== "ok") throw new Error(out);
     return JSON.parse(o.result);
 }
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-(async () => {
-    const g0 = call("newGame", "{}");
-    console.log("game", g0.gameId, "seed", g0.seed.slice(0, 16), "chunks", g0.chunks, "pow", JSON.stringify(g0.pow));
-    let won = null;
-    for (let i = 0; i < 40 && !won; i++) {     // the bot needs a winning game on THIS seed
-        const { g, rec } = B.play(g0.seed, g0.params);
-        if (g.won) won = rec; else break;
+const view = "str:" + JSON.stringify({ w: 1000, h: 700 });
+const g0 = call("newGame", "str:{}");
+console.log("game", g0.gameId, "params", JSON.stringify(g0.params), "pow", JSON.stringify(g0.pow));
+let f = call("frame", "str:" + g0.gameId, "0", "0", view), calls = 1;
+while (!(f.over && f.check.state === "done")) {
+    let dx = 0, dy = 0, bd = 1e12;
+    for (let i = 0; i < f.pellets.length; i += 3) {
+        const x = f.pellets[i] - 500, y = f.pellets[i + 1] - 350, d = Math.abs(x) + Math.abs(y);
+        if (d < bd) { bd = d; dx = x; dy = y; }
     }
-    if (!won) { console.log("the bot lost on this seed; run again"); process.exit(3); }
-    let p;
-    for (;;) { p = call("progress", g0.gameId); if (p.found.length >= g0.chunks) break; await sleep(500); }
-    console.log("digested", p.found.length, "chunks with", p.hashes, "hashes at", Math.round(p.hashRate), "h/s");
-    const nonce = new Map(p.found.map(([c, n]) => [c, n]));
-    won.digests = won.digests.map(([t, c]) => [t, c, nonce.get(c)]);
-    const t0 = Date.now();
-    call("finish", g0.gameId, JSON.stringify(won));
-    for (;;) { p = call("progress", g0.gameId); if (p.check.state === "done") break; await sleep(300); }
-    console.log("check:", JSON.stringify(p.check.result), "in", Date.now() - t0, "ms");
-    const bad = JSON.parse(JSON.stringify(won)); bad.digests[3][2] = (bad.digests[3][2] + 1) >>> 0;
-    call("finish", g0.gameId, JSON.stringify(bad));
-    for (;;) { p = call("progress", g0.gameId); if (p.check.state === "done") break; await sleep(300); }
-    console.log("tampered nonce:", JSON.stringify(p.check.result));
-    const bad2 = JSON.parse(JSON.stringify(won)); bad2.inputs[5][1] = (bad2.inputs[5][1] + 32) % 64;
-    call("finish", g0.gameId, JSON.stringify(bad2));
-    for (;;) { p = call("progress", g0.gameId); if (p.check.state === "done") break; await sleep(300); }
-    console.log("tampered move:", JSON.stringify(p.check.result));
-    call("abandon", g0.gameId);
-})().catch(e => { console.error(e.message); process.exit(1); });
+    f = call("frame", "str:" + g0.gameId, String(Math.round(dx)), String(Math.round(dy)), view); calls++;
+    if (calls % 20 === 0) console.log(`  t=${f.seconds.toFixed(1)}s size ${f.me.body}/${f.me.goal} stomach ${f.me.stomach} proofs ${f.proofs.found}/${f.proofs.need} deaths ${f.me.deaths}`);
+    if (f.over && !f.won) throw new Error("lost: " + f.why);
+}
+console.log("core's check:", JSON.stringify(f.check.result), `(${calls} frames)`);
+if (!f.check.result.ok) process.exit(1);
+const r = call("record", "str:" + g0.gameId);
+const again = call("checkRecord", "str:" + r.seed, "str:" + JSON.stringify(r.record));
+console.log("checkRecord of the record:", again.ok, again.hash);
+const bad = JSON.parse(JSON.stringify(r.record)); bad.digests[1][2] = (bad.digests[1][2] + 1) >>> 0;
+console.log("tampered nonce:", JSON.stringify(call("checkRecord", "str:" + r.seed, "str:" + JSON.stringify(bad))));
+const bad2 = JSON.parse(JSON.stringify(r.record)); bad2.inputs[2][1] = (bad2.inputs[2][1] + 32) % 64;
+console.log("tampered move:", JSON.stringify(call("checkRecord", "str:" + r.seed, "str:" + JSON.stringify(bad2))));
+console.log("another seed:", JSON.stringify(call("checkRecord", "str:" + "ab".repeat(32), "str:" + JSON.stringify(r.record))));
+call("abandon", "str:" + g0.gameId);

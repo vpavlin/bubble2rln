@@ -7,13 +7,13 @@
 struct BubbleCorePrivate;
 
 /**
- * BubbleCoreImpl - the engine behind the Bubble Basecamp view.
+ * BubbleCoreImpl - the whole game behind the Bubble Basecamp view.
  *
- * The view plays the game (sim.js, the same file this module embeds). This module:
- *  - starts a game: its seed, the rules (params) and the digestion proof of work (pow);
+ * The view only draws and steers. This module:
+ *  - runs the game (sim.h) on its own 30 Hz loop, while the view keeps asking for frames;
+ *  - records every heading change and digestion (the record the claim carries);
  *  - digests: background threads find the proof-of-work nonce for every chunk of the game;
- *  - checks a finished game the way the membership allocator will (replay + every nonce),
- *    before anything is claimed.
+ *  - checks a finished game the way the membership allocator will (replay + every nonce).
  *
  * Rules the module glue imposes (see the logos-basecamp-module skill):
  *  - every public method returns a JSON string
@@ -25,26 +25,27 @@ public:
     BubbleCoreImpl();
     ~BubbleCoreImpl() override;
 
-    // The current game, the rules, the proof-of-work settings and this computer's thread count.
+    // The current game id, the rules, the proof-of-work settings and the digesting thread count.
     std::string snapshot();
 
-    // A new game (the previous one stops): {"ok", "gameId", "seed", "params", "pow", "chunks"}.
-    // optionsJson: {} for now.
+    // A new game (the previous one stops): {"ok", "gameId", "params", "pow", "chunks", "threads"}.
+    // It starts paused and runs while frame() keeps being called. optionsJson: {} for now.
     std::string newGame(const std::string& optionsJson);
 
-    // The game's digestion so far: {"ok", "found": [[chunk, nonce], ...] in chunk order, "hashes",
-    // "hashRate", "check": {"state": "" | "running" | "done", "result": {...}}}.
-    std::string progress(const std::string& gameId);
-
-    // The finished game's record ({v, seed, inputs, digests, end}); checks it in the background,
-    // the result arrives in progress().check.
-    std::string finish(const std::string& gameId, const std::string& recordJson);
+    // Steer and get the picture. dx, dy: where the pointer is, in px from the middle of the view
+    // (0, 0 = stand still). viewJson: {"w": px, "h": px}. The reply is the visible world in view
+    // px: {"ok", "tick", "over", "won", "why", "me", "scale", "world", "bots", "pellets",
+    // "proofs", "check"}. Without a frame for 400 ms the game pauses.
+    std::string frame(const std::string& gameId, int64_t dx, int64_t dy, const std::string& viewJson);
 
     // Stop the game and its digestion.
     std::string abandon(const std::string& gameId);
 
-    // The game rules as sim.js, for a tool that wants to replay a record itself.
-    std::string simSource();
+    // The game's record so far: {"ok", "seed", "params", "pow", "record"}.
+    std::string record(const std::string& gameId);
+
+    // Check any record against this module's rules: {"ok", "reason", ...} (for tests and tools).
+    std::string checkRecord(const std::string& seedHex, const std::string& recordJson);
 
 private:
     BubbleCorePrivate* d;

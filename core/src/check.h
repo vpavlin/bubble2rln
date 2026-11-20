@@ -1,14 +1,19 @@
 #pragma once
 // The full check of a played game, shared by the core (before claiming) and the verifier:
-// replay the record with sim.js in a QJSEngine, then check every digestion nonce.
+// replay the record with the rules (sim.h), then check every digestion nonce (pow.h).
 #include <string>
 #include <nlohmann/json.hpp>
+#include "sim.h"
 
 namespace bubble {
-// params: the sim params {start, goal, chunk, minTicks, maxTicks}; pow: {bits, memKiB}.
-// Returns {"ok": bool, "reason": "...", "ticks", "body", "chunks"}. Call from any one thread at a
-// time per call (it makes its own engine); it takes seconds for a long game.
-nlohmann::json checkGame(const std::string& seedHex, const nlohmann::json& params, const nlohmann::json& pow,
-                         const nlohmann::json& record);
-const char* simSource();
+
+struct PowParams {
+    int bits = 10;
+    size_t memKiB = 8192;
+    nlohmann::json toJson() const { return {{"bits", bits}, {"memKiB", memKiB}}; }
+};
+
+// {"ok": bool, "reason", "ticks", "body", "chunks", "deaths", "hash"}. Thread-safe; a long game
+// takes a few hundred ms plus one argon2id per chunk.
+nlohmann::json checkGame(const std::string& seedHex, const Params& params, const PowParams& pow, const nlohmann::json& record);
 }
