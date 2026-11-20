@@ -134,6 +134,9 @@ function markPellets(g, x, y, r, who) {
     }
 }
 
+// How many chunks take the body from start to goal: the proofs of work a game needs.
+function chunksNeeded(p) { return Math.trunc((p.goal - p.start + p.chunk - 1) / p.chunk); }
+
 function mass(me) { return me.body + me.stomach; }
 
 function clamp(v) { return v < 0 ? 0 : (v > WORLD ? WORLD : v); }
@@ -186,6 +189,7 @@ function step(g, input, digests) {
     }
     if (digests) for (var d = 0; d < digests.length; d++) {
         if (digests[d] !== g.chunks) return "chunk " + digests[d] + " out of order at tick " + g.tick;
+        if (g.chunks >= chunksNeeded(p)) return "chunk " + digests[d] + " beyond the goal at tick " + g.tick;
         if (me.stomach < p.chunk) return "chunk " + digests[d] + " with nothing to digest at tick " + g.tick;
         me.stomach -= p.chunk; me.body += p.chunk; g.chunks++;
     }
@@ -272,4 +276,4 @@ function replay(seedHex, params, rec) {
 if (typeof module !== "undefined" && module.exports)
     module.exports = { SIM_VERSION: SIM_VERSION, STOP: STOP, DIRS: DIRS, WORLD: WORLD, U: U, defaultParams: defaultParams,
         newGame: newGame, step: step, replay: replay, newRecorder: newRecorder, record: record, stateHash: stateHash,
-        radius: radius, mass: mass, dirOf: dirOf, isqrt: isqrt };
+        radius: radius, mass: mass, chunksNeeded: chunksNeeded, dirOf: dirOf, isqrt: isqrt };

@@ -1,7 +1,7 @@
 // A greedy bot: chase the best nearby food, run from anything bigger. Digestion is instant
 // (as if the proof of work were free), so this measures the gameplay part alone.
 // usage: node bot.js [games] [seedPrefix]
-const S = require("./sim.js");
+const S = require("../core/src/sim.js");
 const crypto = require("crypto");
 
 function decide(g) {
@@ -38,7 +38,7 @@ function play(seed, params) {
     while (!g.over) {
         const dir = decide(g);
         const dig = [];
-        while (g.me.stomach >= params.chunk * (dig.length + 1)) dig.push([g.chunks + dig.length, 0]);
+        while (g.me.stomach >= params.chunk * (dig.length + 1) && g.chunks + dig.length < S.chunksNeeded(params)) dig.push([g.chunks + dig.length, 0]);
         S.record(rec, g.tick, dir, dig);
         const err = S.step(g, dir, dig.map(d => d[0]));
         if (err) throw new Error(err);
