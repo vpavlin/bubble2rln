@@ -17,17 +17,18 @@ var DIRS = 64;
 var STOP = 64;          // input value: stand still
 
 var U = 16;             // units per px
-var WORLD = 3000 * U;   // square world side
-var PELLETS = 160;
+var WORLD = 2400 * U;   // square world side
+var PELLETS = 320;
 var BOTS = 24;
 var RETARGET = 12;      // ticks between a bot's decisions
 var SIGHT = 450 * U;    // how far a bot looks
+var SHIELD = 90;        // ticks a respawned player can't be eaten
 var CELL = 128 * U;     // pellet grid cell (only a speed-up: results are as without it)
 var CELLS = Math.trunc((WORLD + CELL - 1) / CELL) + 1;
 
 // Defaults; the allocator's config decides the real ones and the claim must match them.
 function defaultParams() {
-    return { start: 10, goal: 300, chunk: 5, minTicks: 1800, maxTicks: 36000 };
+    return { start: 10, goal: 200, chunk: 5, minTicks: 1800, maxTicks: 36000 };
 }
 
 // ---- integer helpers -------------------------------------------------------------------------
@@ -88,7 +89,7 @@ function newGame(seedHex, params) {
     var p = params || defaultParams();
     var g = {
         v: SIM_VERSION, p: p, rng: rngFromHex(seedHex), tick: 0,
-        me: { x: WORLD / 2, y: WORLD / 2, body: p.start, stomach: 0, dir: STOP },
+        me: { x: WORLD / 2, y: WORLD / 2, body: p.start, stomach: 0, dir: STOP, shield: SHIELD }, deaths: 0,
         bots: [], pellets: [], chunks: 0, over: false, won: false, why: ""
     };
     for (var i = 0; i < PELLETS; i++) g.pellets.push(spawnPellet(g));
@@ -141,9 +142,9 @@ function mass(me) { return me.body + me.stomach; }
 
 function clamp(v) { return v < 0 ? 0 : (v > WORLD ? WORLD : v); }
 
-function move(o, dir, m) {
+function move(o, dir, m, boost) {
     if (dir === STOP) return;
-    var s = speed(m);
+    var s = boost ? Math.trunc(speed(m) * 115 / 100) : speed(m);
     o.x = clamp(o.x + Math.trunc(COS[dir] * s / 1024));
     o.y = clamp(o.y + Math.trunc(SIN[dir] * s / 1024));
 }
@@ -193,8 +194,8 @@ function step(g, input, digests) {
         if (me.stomach < p.chunk) return "chunk " + digests[d] + " with nothing to digest at tick " + g.tick;
         me.stomach -= p.chunk; me.body += p.chunk; g.chunks++;
     }
-    move(me, me.dir, mass(me));
-    for (var i = 0; i < g.bots.length; i++) { botThink(g, g.bots[i], i); move(g.bots[i], g.bots[i].dir, g.bots[i].mass); }
+    move(me, me.dir, mass(me), true);      // the player is 15% quicker than a bot its size
+    for (var i = 0; i < g.bots.length; i++) { botThink(g, g.bots[i], i); move(g.bots[i], g.bots[i].dir, g.bots[i].mass, false); }
 
     // Pellets: each goes to the first mover (the player, then the bots in order) whose circle
     // holds it at the start of the pass; then they respawn in pellet order.
@@ -213,7 +214,13 @@ function step(g, input, digests) {
         var mm = mass(me);
         if (eats(me.x, me.y, mm, radius(mm), ba.x, ba.y, ba.mass)) { me.stomach += ba.mass; g.bots[a] = spawnBot(g, 4 + randInt(g.rng, 40)); continue; }
         var ra = radius(ba.mass);
-        if (eats(ba.x, ba.y, ba.mass, ra, me.x, me.y, mass(me))) { g.over = true; g.why = "eaten"; break; }
+        if (me.shield === 0 && eats(ba.x, ba.y, ba.mass, ra, me.x, me.y, mass(me))) {
+            // Eaten: the bot gets what was still undigested; the digested body is safe. Respawn
+            // somewhere else with a short shield.
+            ba.mass += me.stomach; ra = radius(ba.mass);
+            me.stomach = 0; g.deaths++; me.shield = SHIELD;
+            me.x = randInt(g.rng, WORLD); me.y = randInt(g.rng, WORLD);
+        }
         for (var c = 0; c < g.bots.length; c++) {
             if (c === a) continue;
             var bc = g.bots[c];
@@ -222,6 +229,7 @@ function step(g, input, digests) {
         // Huge bots slowly shrink, so the world never locks up.
         if (ba.mass > 600 && (g.tick + a) % 30 === 0) ba.mass -= 1;
     }
+    if (me.shield > 0) me.shield--;
     g.tick++;
     if (!g.over && me.body >= p.goal && g.tick >= p.minTicks) { g.over = true; g.won = true; g.why = "goal"; }
     if (!g.over && g.tick >= p.maxTicks) { g.over = true; g.why = "time"; }
@@ -232,7 +240,7 @@ function step(g, input, digests) {
 function stateHash(g) {
     var h = 0x811c9dc5;
     function mix(v) { h = Math.imul((h ^ (v >>> 0)) >>> 0, 16777619) >>> 0; }
-    mix(g.tick); mix(g.me.x); mix(g.me.y); mix(g.me.body); mix(g.me.stomach); mix(g.chunks);
+    mix(g.tick); mix(g.deaths); mix(g.me.shield); mix(g.me.x); mix(g.me.y); mix(g.me.body); mix(g.me.stomach); mix(g.chunks);
     for (var i = 0; i < 4; i++) mix(g.rng.s[i]);
     for (var j = 0; j < g.bots.length; j++) { mix(g.bots[j].x); mix(g.bots[j].y); mix(g.bots[j].mass); mix(g.bots[j].dir); }
     for (var k = 0; k < g.pellets.length; k++) { mix(g.pellets[k].x); mix(g.pellets[k].y); }
@@ -269,7 +277,7 @@ function replay(seedHex, params, rec) {
     }
     if (ii !== ins.length || di !== dg.length) return { ok: false, reason: "entries after the end" };
     if (!g.won) return { ok: false, reason: g.over ? ("lost: " + g.why) : "goal not reached", ticks: g.tick, body: g.me.body };
-    return { ok: true, reason: "", ticks: g.tick, body: g.me.body, chunks: g.chunks, hash: stateHash(g) };
+    return { ok: true, reason: "", ticks: g.tick, body: g.me.body, chunks: g.chunks, deaths: g.deaths, hash: stateHash(g) };
 }
 
 // For a module that loads this file as a plain script.

@@ -5,6 +5,7 @@
 #include <sodium.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -18,10 +19,17 @@ using nlohmann::json;
 
 namespace {
 
-json defaultParams() { return {{"start", 10}, {"goal", 300}, {"chunk", 5}, {"minTicks", 1800}, {"maxTicks", 36000}}; }
+// The rules of a game. sim.js has the same defaults for the node tools; these are the ones that
+// count (and, with the allocator, its config). BUBBLE_GOAL / BUBBLE_MIN_TICKS shorten a test game.
+json defaultParams() {
+    json p = {{"start", 10}, {"goal", 200}, {"chunk", 5}, {"minTicks", 1800}, {"maxTicks", 36000}};
+    if (const char* e = std::getenv("BUBBLE_GOAL")) p["goal"] = std::max(20, std::atoi(e));
+    if (const char* e = std::getenv("BUBBLE_MIN_TICKS")) p["minTicks"] = std::max(0, std::atoi(e));
+    return p;
+}
 
 json defaultPow() {
-    int bits = 9;
+    int bits = 10;
     if (const char* e = std::getenv("BUBBLE_POW_BITS")) bits = std::atoi(e);
     return {{"bits", bits}, {"memKiB", 8192}};
 }
