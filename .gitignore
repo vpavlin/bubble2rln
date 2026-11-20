@@ -1,0 +1,4 @@
+spike/build/
+spike/build.err
+spike/env.sh
+result*
