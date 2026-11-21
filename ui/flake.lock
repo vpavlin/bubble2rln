@@ -7,14 +7,21 @@
         ]
       },
       "locked": {
-        "path": "../core",
-        "type": "path"
+        "dir": "core",
+        "lastModified": 1795266093,
+        "narHash": "sha256-HP0miX4C73uOPPe1k0QEKess9O+qfSJd1NUPQxV7CEk=",
+        "owner": "vpavlin",
+        "repo": "bubble2rln",
+        "rev": "84296f0d5f3d35298fc18e58bb15b833abf90bf7",
+        "type": "github"
       },
       "original": {
-        "path": "../core",
-        "type": "path"
-      },
-      "parent": []
+        "dir": "core",
+        "owner": "vpavlin",
+        "repo": "bubble2rln",
+        "rev": "84296f0d5f3d35298fc18e58bb15b833abf90bf7",
+        "type": "github"
+      }
     },
     "default-container": {
       "inputs": {
