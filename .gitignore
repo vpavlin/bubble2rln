@@ -4,3 +4,5 @@ spike/env.sh
 result*
 result*
 brand.py
+ui/harness/harness
+ui/harness/harness.moc
