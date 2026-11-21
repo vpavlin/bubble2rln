@@ -20,13 +20,15 @@ int leadingZeroBits(const unsigned char h[32]) {
     return n;
 }
 
-bool digestOk(const unsigned char seed[32], uint32_t chunk, uint32_t nonce, int bits, size_t memKiB) {
-    unsigned char pw[16 + 32 + 8];
-    memcpy(pw, "bubble/v1/digest", 16);
+bool digestOk(const unsigned char seed[32], uint32_t chunk, uint32_t tick, uint32_t state, uint32_t nonce, int bits, size_t memKiB) {
+    unsigned char pw[16 + 32 + 16];
+    memcpy(pw, "bubble/v2/digest", 16);
     memcpy(pw + 16, seed, 32);
-    for (int i = 0; i < 4; i++) { pw[48 + i] = (unsigned char)(chunk >> (8 * i)); pw[52 + i] = (unsigned char)(nonce >> (8 * i)); }
+    const uint32_t v[4] = {chunk, tick, state, nonce};
+    for (int k = 0; k < 4; k++)
+        for (int i = 0; i < 4; i++) pw[48 + 4 * k + i] = (unsigned char)(v[k] >> (8 * i));
     unsigned char sb[14 + 32], salt[crypto_hash_sha256_BYTES];
-    memcpy(sb, "bubble/v1/salt", 14);
+    memcpy(sb, "bubble/v2/salt", 14);
     memcpy(sb + 14, seed, 32);
     crypto_hash_sha256(salt, sb, sizeof sb);
     unsigned char h[32];

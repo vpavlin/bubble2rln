@@ -10,6 +10,7 @@
 #include <cmath>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <map>
 #include <memory>
@@ -65,31 +66,60 @@ struct Live {
     Record rec;
     int64_t startedMs = 0;
 
+    // A chunk in the stomach waiting for its proof (mirrors game->queue).
+    struct Job { int64_t chunk; Queued q; uint32_t next = 0; bool done = false; uint32_t nonce = 0; };
+
     std::mutex m;                       // guards everything below and game/rec
+    std::condition_variable cv;         // a new job, or stop
     int dir = kStop;
     int64_t lastFrameMs = 0;
-    std::map<uint32_t, uint32_t> found;
+    std::vector<Job> jobs;
     std::string checkState;
     json checkResult;
+    int64_t rateMs = 0;
+    uint64_t rateHashes = 0;
+    double rate = 0;
 
     std::atomic<bool> stop{false};
-    std::atomic<uint32_t> next{0};
     std::atomic<uint64_t> hashes{0};
     std::vector<std::thread> workers;
     std::thread loop;
 
+    static bool same(const Job& a, int64_t chunk, const Queued& q) { return a.chunk == chunk && a.q.tick == q.tick && a.q.hash == q.hash; }
+
+    // Every thread works on the oldest chunk still without a proof, so the stomach empties in order.
     void digest() {
-        const uint32_t chunks = (uint32_t)params.chunksNeeded();
-        for (uint32_t c; !stop && (c = next++) < chunks;) {
-            for (uint32_t n = 0; !stop; n++) {
-                hashes++;
-                if (digestOk(seed, c, n, pow.bits, pow.memKiB)) {
-                    std::lock_guard<std::mutex> l(m);
-                    found[c] = n;
-                    break;
-                }
-            }
+        std::unique_lock<std::mutex> l(m);
+        while (!stop) {
+            Job* j = nullptr;
+            for (auto& x : jobs) if (!x.done) { j = &x; break; }
+            if (!j) { cv.wait_for(l, std::chrono::milliseconds(200)); continue; }
+            const int64_t chunk = j->chunk;
+            const Queued q = j->q;
+            const uint32_t n = j->next++;
+            l.unlock();
+            hashes++;
+            const bool ok = digestOk(seed, (uint32_t)chunk, (uint32_t)q.tick, q.hash, n, pow.bits, pow.memKiB);
+            l.lock();
+            if (!ok) continue;
+            for (auto& x : jobs) if (same(x, chunk, q) && !x.done) { x.done = true; x.nonce = n; }
         }
+    }
+
+    // After a tick: the jobs follow the game's queue (digested ones leave, new ones come,
+    // and on a death the stomach's work is lost).
+    void syncJobsLocked() {
+        const Game& g = *game;
+        std::vector<Job> nj;
+        bool added = false;
+        for (size_t i = 0; i < g.queue.size(); i++) {
+            const int64_t chunk = g.chunks + (int64_t)i;
+            auto it = std::find_if(jobs.begin(), jobs.end(), [&](const Job& x) { return same(x, chunk, g.queue[i]); });
+            if (it != jobs.end()) nj.push_back(*it);
+            else { nj.push_back(Job{chunk, g.queue[i]}); added = true; }
+        }
+        jobs.swap(nj);
+        if (added) cv.notify_all();
     }
 
     // One tick, under the lock.
@@ -97,16 +127,16 @@ struct Live {
         Game& g = *game;
         std::vector<std::pair<int64_t, uint32_t>> dig;
         std::vector<int64_t> ds;
-        for (int64_t k = g.chunks; k < params.chunksNeeded() && g.me.stomach >= params.chunk * (int64_t)(dig.size() + 1); k++) {
-            auto it = found.find((uint32_t)k);
-            if (it == found.end()) break;
-            dig.push_back({k, it->second});
-            ds.push_back(k);
+        for (const auto& j : jobs) {
+            if (!j.done) break;
+            dig.push_back({j.chunk, j.nonce});
+            ds.push_back(j.chunk);
         }
         rec.add(g.tick, dir, dig);
         std::string err = g.step(dir, ds);
         if (!err.empty()) { g.over = true; g.why = "error: " + err; }
-        if (g.over) rec.end = g.tick;
+        if (g.over) { rec.end = g.tick; jobs.clear(); }
+        else syncJobsLocked();
     }
 
     void run() {
@@ -144,7 +174,8 @@ struct Live {
     }
 
     void shutdown() {
-        stop = true;
+        { std::lock_guard<std::mutex> l(m); stop = true; }
+        cv.notify_all();
         for (auto& t : workers) if (t.joinable()) t.join();
         if (loop.joinable()) loop.join();
     }
@@ -230,10 +261,16 @@ std::string BubbleCoreImpl::frame(const std::string& gameId, int64_t dx, int64_t
         if (x < -5 || y < -5 || x > w + 5 || y > h + 5) continue;
         pellets.push_back(std::lround(x)); pellets.push_back(std::lround(y)); pellets.push_back((int)(j % 6));
     }
-    const int64_t ms = std::max<int64_t>(1, nowMs() - g->startedMs);
-    const uint64_t hs = g->hashes.load();
-    const bool waiting = gm.me.stomach >= g->params.chunk && gm.chunks < g->params.chunksNeeded()
-                         && !g->found.count((uint32_t)gm.chunks);
+    // Hashes per second over the last second or so (the threads idle while the stomach is empty).
+    const int64_t now = nowMs();
+    if (now - g->rateMs >= 1000) {
+        const uint64_t hs = g->hashes.load();
+        if (g->rateMs) g->rate = (double)(hs - g->rateHashes) * 1000.0 / (double)(now - g->rateMs);
+        g->rateMs = now; g->rateHashes = hs;
+    }
+    int64_t ready = 0;
+    for (const auto& j : g->jobs) ready += j.done ? 1 : 0;
+    const bool waiting = !g->jobs.empty() && !g->jobs.front().done;
     json me = {{"r", std::lround(rMe)}, {"body", gm.me.body}, {"stomach", gm.me.stomach},
                {"stomachR", std::lround(mm ? rMe * std::sqrt((double)gm.me.stomach / (double)mm) : 0)},
                {"shield", gm.me.shield > 0}, {"deaths", gm.deaths}, {"start", g->params.start}, {"goal", g->params.goal},
@@ -242,7 +279,7 @@ std::string BubbleCoreImpl::frame(const std::string& gameId, int64_t dx, int64_t
                 {"why", gm.why}, {"me", me}, {"scale", scale},
                 {"world", {std::lround(cx), std::lround(cy), std::lround(kWorld * s), std::lround(100 * kU * s)}},
                 {"bots", bots}, {"pellets", pellets},
-                {"proofs", {{"found", g->found.size()}, {"need", g->params.chunksNeeded()}, {"hashRate", (double)hs * 1000.0 / (double)ms}}},
+                {"proofs", {{"found", gm.chunks + ready}, {"need", g->params.chunksNeeded()}, {"queued", (int64_t)g->jobs.size()}, {"hashRate", g->rate}}},
                 {"check", {{"state", g->checkState}, {"result", g->checkResult}}}}.dump();
 }
 

@@ -172,7 +172,9 @@ std::string Game::step(int input, const std::vector<int64_t>& digests) {
     for (int64_t c : digests) {
         if (c != chunks) return "chunk " + std::to_string(c) + " out of order at tick " + std::to_string(tick);
         if (chunks >= p.chunksNeeded()) return "chunk " + std::to_string(c) + " beyond the goal at tick " + std::to_string(tick);
-        if (me.stomach < p.chunk) return "chunk " + std::to_string(c) + " with nothing to digest at tick " + std::to_string(tick);
+        if (me.stomach < p.chunk || queue.empty()) return "chunk " + std::to_string(c) + " with nothing to digest at tick " + std::to_string(tick);
+        digested.push_back(queue.front());
+        queue.erase(queue.begin());
         me.stomach -= p.chunk; me.body += p.chunk; chunks++;
     }
     move(me.x, me.y, me.dir, mass(), true);   // the player is 15% quicker than a bot its size
@@ -204,6 +206,7 @@ std::string Game::step(int input, const std::vector<int64_t>& digests) {
             // Eaten: the bot gets what was still undigested; the digested body is safe.
             ba.mass += me.stomach; ra = radius(ba.mass);
             me.stomach = 0; deaths++; me.shield = kShield;
+            queue.clear();   // the proofs being searched for are lost with the food
             me.x = rng.below(kWorld); me.y = rng.below(kWorld);
         }
         for (size_t c = 0; c < bots.size(); c++) {
@@ -219,21 +222,31 @@ std::string Game::step(int input, const std::vector<int64_t>& digests) {
     }
     if (me.shield > 0) me.shield--;
     tick++;
+    // Whole chunks in the stomach join the digestion queue, each bound to this tick and state.
+    if (me.stomach >= p.chunk * (int64_t)(queue.size() + 1) && chunks + (int64_t)queue.size() < p.chunksNeeded()) {
+        const uint32_t h = stateHash32();
+        while (me.stomach >= p.chunk * (int64_t)(queue.size() + 1) && chunks + (int64_t)queue.size() < p.chunksNeeded())
+            queue.push_back({tick, h});
+    }
     if (!over && me.body >= p.goal && tick >= p.minTicks) { over = true; won = true; why = "goal"; }
     if (!over && tick >= p.maxTicks) { over = true; why = "time"; }
     return "";
 }
 
 std::string Game::stateHash() const {
+    char buf[9];
+    snprintf(buf, sizeof buf, "%08x", stateHash32());
+    return buf;
+}
+
+uint32_t Game::stateHash32() const {
     uint32_t h = 0x811c9dc5u;
     auto mix = [&](int64_t v) { h = (h ^ (uint32_t)v) * 16777619u; };
     mix(tick); mix(deaths); mix(me.shield); mix(me.x); mix(me.y); mix(me.body); mix(me.stomach); mix(chunks);
     for (int i = 0; i < 4; i++) mix(rng.s[i]);
     for (const auto& b : bots) { mix(b.x); mix(b.y); mix(b.mass); mix(b.dir); }
     for (const auto& pl : pellets) { mix(pl.x); mix(pl.y); }
-    char buf[9];
-    snprintf(buf, sizeof buf, "%08x", h);
-    return buf;
+    return h;
 }
 
 void Record::add(int64_t tick, int dir, const std::vector<std::pair<int64_t, uint32_t>>& digested) {
@@ -269,7 +282,7 @@ bool Record::fromJson(const json& j, Record& o, std::string& why) {
     return true;
 }
 
-json replay(const std::string& seedHex, const Params& p, const Record& rec) {
+json replay(const std::string& seedHex, const Params& p, const Record& rec, std::vector<Queued>* digested) {
     if (rec.end < 1 || rec.end > p.maxTicks) return {{"ok", false}, {"reason", "bad end tick"}};
     Game g(seedHex, p);
     size_t ii = 0, di = 0;
@@ -284,6 +297,7 @@ json replay(const std::string& seedHex, const Params& p, const Record& rec) {
     }
     if (ii != rec.inputs.size() || di != rec.digests.size()) return {{"ok", false}, {"reason", "entries after the end"}};
     if (!g.won) return {{"ok", false}, {"reason", g.over ? ("lost: " + g.why) : "goal not reached"}, {"ticks", g.tick}, {"body", g.me.body}};
+    if (digested) *digested = g.digested;
     return {{"ok", true}, {"reason", ""}, {"ticks", g.tick}, {"body", g.me.body}, {"chunks", g.chunks}, {"deaths", g.deaths}, {"hash", g.stateHash()}};
 }
 

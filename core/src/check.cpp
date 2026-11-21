@@ -14,11 +14,15 @@ json checkGame(const std::string& seedHex, const Params& params, const PowParams
     if (!Record::fromJson(record, rec, why)) return {{"ok", false}, {"reason", why}};
     if (record.contains("seed") && record["seed"] != seedHex) return {{"ok", false}, {"reason", "the record is for another seed"}};
     // The moves first: cheaper to refuse a wrong game before hashing.
-    json out = replay(seedHex, params, rec);
+    std::vector<Queued> queued;
+    json out = replay(seedHex, params, rec, &queued);
     if (!out.value("ok", false)) return out;
-    for (const auto& [t, chunk, nonce] : rec.digests) {
+    if (queued.size() != rec.digests.size()) return {{"ok", false}, {"reason", "digestions do not match the game"}};
+    for (size_t i = 0; i < rec.digests.size(); i++) {
+        const auto& [t, chunk, nonce] = rec.digests[i];
         (void)t;
-        if (chunk < 0 || chunk > 0xffffffffll || !digestOk(seed, (uint32_t)chunk, nonce, pow.bits, pow.memKiB))
+        if (chunk < 0 || chunk > 0xffffffffll
+            || !digestOk(seed, (uint32_t)chunk, (uint32_t)queued[i].tick, queued[i].hash, nonce, pow.bits, pow.memKiB))
             return {{"ok", false}, {"reason", "chunk " + std::to_string(chunk) + " was not digested (proof of work fails)"}};
     }
     return out;

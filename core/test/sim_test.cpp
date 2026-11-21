@@ -60,7 +60,8 @@ int main(int argc, char** argv) {
         std::string seed = v["seed"];
         CHECK(Game(seed, p).stateHash() == v["hash0"], "initial hash %s", seed.substr(0, 8).c_str());
         Record rec; std::string why;
-        json rj = v["rec"]; rj["digests"] = json::array();
+        // The moves of v1 and v2 are the same; only the proof of work changed.
+        json rj = v["rec"]; rj["v"] = kSimVersion; rj["digests"] = json::array();
         for (const auto& d : v["rec"]["digests"]) rj["digests"].push_back({d[0], d[1], 0});
         CHECK(Record::fromJson(rj, rec, why), "record: %s", why.c_str());
         json r = replay(seed, p, rec);
@@ -110,8 +111,9 @@ int main(int argc, char** argv) {
         while (!g.over) {
             int d = decide(g);
             std::vector<std::pair<int64_t, uint32_t>> dig; std::vector<int64_t> ds;
-            if (g.me.stomach >= q.chunk && g.chunks < q.chunksNeeded()) {
-                uint32_t n = 0; while (!digestOk(sb, (uint32_t)g.chunks, n, pw.bits, pw.memKiB)) n++;
+            if (!g.queue.empty()) {
+                const Queued& qd = g.queue.front();
+                uint32_t n = 0; while (!digestOk(sb, (uint32_t)g.chunks, (uint32_t)qd.tick, qd.hash, n, pw.bits, pw.memKiB)) n++;
                 dig.push_back({g.chunks, n}); ds.push_back(g.chunks);
             }
             rec.add(g.tick, d, dig); g.step(d, ds);

@@ -73,8 +73,11 @@ Stronger identity (keycard, mined PoW) stays the upgrade path.
 - **Nullifier** = `H(seed)`, so one game claims at most once.
 
 ### 3.2 Work as the growth mechanic (the "proof of work" part)
-- Growth is **digestion**: each pellet you eat has to be digested by memory-hard hashing
-  (argon2id, so GPUs gain less), bound to the seed and the tick.
+- Growth is **digestion**: what you eat goes to the stomach; every whole chunk of 5 has to be
+  digested by memory-hard hashing (argon2id, so GPUs gain less) before it counts.
+  - Each proof is bound to the seed, the chunk, and the tick and game state hash at which the
+    chunk entered the stomach. No proof can be searched for before the food is eaten, and being
+    eaten loses the stomach and the work on it.
   - Your device's hash rate caps how fast you can grow.
   - The UI shows it.
 - The verifier checks the digestion nonces cheaply (one argon2 call per pellet, or a sampled

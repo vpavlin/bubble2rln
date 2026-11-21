@@ -1,7 +1,7 @@
 // Headless test of bubble_core through logosctl: new game -> steer to the nearest dot through
 // frame() until the goal -> the core's own check passes -> tampered copies of the record fail.
 // Start the session's daemon with a short game and a slow-driver pause, e.g.
-//   BUBBLE_GOAL=40 BUBBLE_MIN_TICKS=300 BUBBLE_POW_BITS=6 BUBBLE_PAUSE_MS=5000
+//   BUBBLE_GOAL=60 BUBBLE_MIN_TICKS=300 BUBBLE_POW_BITS=10 BUBBLE_PAUSE_MS=5000
 // usage: node e2e-core.js SESSION
 const { execFileSync } = require("child_process");
 const sess = process.argv[2] || "bubble";
@@ -22,7 +22,7 @@ while (!(f.over && f.check.state === "done")) {
         if (d < bd) { bd = d; dx = x; dy = y; }
     }
     f = call("frame", "str:" + g0.gameId, String(Math.round(dx)), String(Math.round(dy)), view); calls++;
-    if (calls % 20 === 0) console.log(`  t=${f.seconds.toFixed(1)}s size ${f.me.body}/${f.me.goal} stomach ${f.me.stomach} proofs ${f.proofs.found}/${f.proofs.need} deaths ${f.me.deaths}`);
+    if (calls % 20 === 0) console.log(`  t=${f.seconds.toFixed(1)}s size ${f.me.body}/${f.me.goal} stomach ${f.me.stomach} proofs ${f.proofs.found}/${f.proofs.need} queued ${f.proofs.queued}${f.me.digesting ? " (digesting)" : ""} ${Math.round(f.proofs.hashRate)} h/s deaths ${f.me.deaths}`);
     if (f.over && !f.won) throw new Error("lost: " + f.why);
 }
 console.log("core's check:", JSON.stringify(f.check.result), `(${calls} frames)`);

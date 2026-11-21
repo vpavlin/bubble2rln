@@ -12,7 +12,7 @@
 
 namespace bubble {
 
-constexpr int kSimVersion = 1;
+constexpr int kSimVersion = 2;
 constexpr int kDirs = 64;
 constexpr int kStop = 64;              // input: stand still
 constexpr int64_t kU = 16;             // units per px
@@ -38,6 +38,10 @@ struct Rng {
     int64_t below(int64_t n) { return (int64_t)(next() % (uint32_t)n); }
 };
 
+// A chunk waiting in the stomach for its proof of work. Its proof is bound to the tick it was
+// swallowed at and the game state then, so no proof can be searched for before the food is eaten.
+struct Queued { int64_t tick; uint32_t hash; };
+
 class Game {
 public:
     // seedHex: at least 32 hex digits; the first 32 seed the PRNG.
@@ -48,6 +52,7 @@ public:
     std::string step(int input, const std::vector<int64_t>& digests);
 
     std::string stateHash() const;
+    uint32_t stateHash32() const;
     int64_t mass() const { return me.body + me.stomach; }
 
     Params p;
@@ -56,6 +61,8 @@ public:
     Me me;
     std::vector<Bot> bots;
     std::vector<Pellet> pellets;
+    std::vector<Queued> queue;      // the stomach's whole chunks, in order: chunk = chunks + i
+    std::vector<Queued> digested;   // what each digested chunk was queued as, in chunk order
     bool over = false, won = false;
     std::string why;
 
@@ -87,6 +94,7 @@ struct Record {
 
 // Replays a record: {"ok", "reason", "ticks", "body", "chunks", "deaths", "hash"}. Moves only;
 // the proof-of-work nonces are checked by checkGame (check.h).
-nlohmann::json replay(const std::string& seedHex, const Params& p, const Record& rec);
+// digested (if given) gets what each digested chunk was queued as, for the proof-of-work check.
+nlohmann::json replay(const std::string& seedHex, const Params& p, const Record& rec, std::vector<Queued>* digested = nullptr);
 
 }
