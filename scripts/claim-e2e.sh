@@ -12,6 +12,8 @@
 #   RLN_LEZ_LGX   rln_lez_module to load on the gifter (unset = no registration: the claim is
 #                 verified, then waits for a registry module that never comes)
 #   GIFTER_ENV    extra env for the gifter daemon (e.g. LEZ_RLN_SEQUENCER=… LEZ_RLN_PAYER_KEY=…)
+#   GIFTER_PEER, GIFTER_ADDR  claim from a running gifter instead (e.g. the VPS one): only the
+#                 player session is started; REGISTRY must be the one that gifter serves
 #   RLN_MODULE_LGX  rln_module for the player: the claim then uses the player's own RLN identity
 #                 (needs RLN_LEZ_LGX too; PLAYER_ENV points its rln_lez_module at the chain,
 #                 e.g. LEZ_RLN_SEQUENCER=http://127.0.0.1:3040/; NETWORK names it, default local)
@@ -30,7 +32,10 @@ j() { python3 -c "import json,sys; print(json.dumps(json.loads(sys.argv[1])))" "
 call() { local s=$1; shift; "$CTL" "$s" -j call "$@" | tail -1; }
 result() { python3 -c 'import json,sys; o=json.loads(sys.stdin.read()); r=o.get("result"); print(r if isinstance(r,str) else json.dumps(r))'; }
 
+SESSIONS="gift play"; if [ -n "${GIFTER_PEER:-}" ]; then SESSIONS=play; fi
+
 up() {
+    if [ "$SESSIONS" = play ]; then up_player; return; fi
     env ${GIFTER_ENV:-} "$CTL" gift daemon start --detach | tail -1
     env ${PLAYER_ENV:-} BUBBLE_LEZ_URL=$LEZ_URL BUBBLE_GOAL=$GOAL BUBBLE_MIN_TICKS=$MIN_TICKS BUBBLE_POW_BITS=$BITS BUBBLE_PAUSE_MS=5000 \
         "$CTL" play daemon start --detach | tail -1
@@ -72,7 +77,7 @@ claim() {
     local idc opts r
     idc=$(python3 -c "import os; print((os.urandom(31) + b'\x00').hex())")   # a valid BN254 element, little-endian
     opts=$(python3 -c "import json; o = {'config': '$REGISTRY', 'identityCommitment': '$idc', 'rate': 100,
-        'allocatorPeerId': '$peer', 'allocatorMultiaddr': '/ip4/127.0.0.1/tcp/9101'}
+        'allocatorPeerId': '$peer', 'allocatorMultiaddr': '${addr:-/ip4/127.0.0.1/tcp/9101}'}
 if '${RLN_MODULE_LGX:-}': o.update({'identity': 'rln', 'network': '${NETWORK:-local}'}); del o['identityCommitment']
 print(json.dumps(o))")
     echo "claim: $(call play bubble_core claim "str:$game" "str:$opts" | result)"
@@ -83,7 +88,21 @@ print(json.dumps(o))")
     echo "claim status: $r"
 }
 
-down() { for s in gift play; do "$CTL" $s daemon stop | tail -1; done; }
+up_player() {
+    env ${PLAYER_ENV:-} BUBBLE_LEZ_URL=$LEZ_URL BUBBLE_GOAL=$GOAL BUBBLE_MIN_TICKS=$MIN_TICKS BUBBLE_POW_BITS=$BITS BUBBLE_PAUSE_MS=5000 \
+        "$CTL" play daemon start --detach | tail -1
+    "$CTL" play package install -y libp2p_module >/dev/null
+    "$CTL" play install "$CORE_LGX" -y >/dev/null
+    "$CTL" play install "$CLIENT_LGX" -y >/dev/null
+    "$CTL" play module load libp2p_module >/dev/null
+    call play libp2p_module createNode 'str:{"addrs":["/ip4/0.0.0.0/tcp/9102"],"transport":"tcp","mountGossipsub":false,"mountKad":false,"mountServiceDiscovery":false}' >/dev/null
+    call play libp2p_module start >/dev/null
+    "$CTL" play module load bubble_core >/dev/null
+    "$CTL" play module load membership_allocation_client_module >/dev/null
+    printf 'peer=%s\naddr=%s\n' "$GIFTER_PEER" "$GIFTER_ADDR" > "$STATE"
+}
+
+down() { for s in $SESSIONS; do "$CTL" $s daemon stop | tail -1; done; }
 
 case "${1:-all}" in
     up) up ;; play) play ;; claim) claim ;; down) down ;;

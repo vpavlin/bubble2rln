@@ -1,0 +1,19 @@
+#!/bin/bash
+# Load and configure the gifter once the logosctl daemon answers.
+set -u
+G=/root/bubble-gifter
+. $G/env.sh
+CTL=$G/ctl.sh
+for i in $(seq 1 60); do $CTL status >/dev/null 2>&1 && break; sleep 2; done
+call() { $CTL -j call "$@" | tail -1; }
+$CTL module load libp2p_module
+call libp2p_module createNode "str:{\"addrs\":[\"/ip4/0.0.0.0/tcp/$GIFTER_PORT\"],\"transport\":\"tcp\",\"privKey\":\"$(cat $G/node.key)\",\"mountGossipsub\":false,\"mountKad\":false,\"mountServiceDiscovery\":false}"
+call libp2p_module start
+$CTL module load bubble_core
+$CTL module load rln_lez_module
+$CTL module load membership_allocation_module
+serve=$(python3 -c "import json; print(json.dumps({'config': '$REGISTRY', 'advertise': False,
+    'consumedNullifiersPath': '$G/nullifiers.json',
+    'authVerifiers': {'bubble-play': {'module': 'bubble_core', 'config': {'maxBeaconAgeS': 3600, 'maxClaimsPerHour': $MAX_PER_HOUR}}}}))")
+call membership_allocation_module serve "str:$serve"
+call libp2p_module getNodeInfo str:PeerId

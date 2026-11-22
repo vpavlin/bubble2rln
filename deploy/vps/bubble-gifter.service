@@ -1,0 +1,15 @@
+[Unit]
+Description=Bubble gifter: RLN membership allocator with bubble_core as the bubble-play verifier
+After=network-online.target bubble-chain.service
+Wants=network-online.target
+Requires=bubble-chain.service
+
+[Service]
+ExecStart=/bin/bash -c '. /root/bubble-gifter/env.sh && exec /root/scala-hub2/logosctl-app/squashfs-root/AppRun daemon start'
+ExecStartPost=/root/bubble-gifter/after-start
+TimeoutStartSec=300
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

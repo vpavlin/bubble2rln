@@ -1,0 +1,12 @@
+[Unit]
+Description=Bubble gifter: local LEZ sequencer with the RLN registry (devnet, localhost only)
+After=network-online.target
+
+[Service]
+Environment=RUST_LOG=warn PATH=/root/bubble-gifter/chain/bin:/usr/bin
+ExecStart=/root/bubble-gifter/chain/sequencer_service start /root/bubble-gifter/chain/home --rpc-listen-address 127.0.0.1:3040 --metrics-listen-address 127.0.0.1:9140
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -54,7 +54,14 @@ int64_t wallMs() {
 // The gifter this build claims from by default: its libp2p peer id and address, and the
 // registry (config account, base58) it serves. BUBBLE_GIFTER_PEER / BUBBLE_GIFTER_ADDR /
 // BUBBLE_REGISTRY override them; claim()'s options override everything.
-struct GifterDefaults { std::string peer, addr, registry, network = "testnet", identity = "demo"; };
+// The default is the public gifter on the VPS (deploy/vps): it registers on its own devnet
+// registry, so the claim uses the demo identity there.
+struct GifterDefaults {
+    std::string peer = "16Uiu2HAkx4HRjCAN4HCWZyqXn7ZxnDGhxQhcpDuBhANBhx3VXP88";
+    std::string addr = "/ip4/128.140.55.128/tcp/9101";
+    std::string registry = "APtni2RgeHkW6HChE1VL1jgdnUr1jyd1smV13JjDPk74";
+    std::string network = "local", identity = "demo";
+};
 GifterDefaults gifterDefaults() {
     GifterDefaults g;
     // BUBBLE_IDENTITY=rln claims with the player's own RLN identity (rln_module), on
