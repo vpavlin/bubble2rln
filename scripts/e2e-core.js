@@ -35,4 +35,5 @@ console.log("tampered nonce:", JSON.stringify(call("checkRecord", "str:" + r.see
 const bad2 = JSON.parse(JSON.stringify(r.record)); bad2.inputs[2][1] = (bad2.inputs[2][1] + 32) % 64;
 console.log("tampered move:", JSON.stringify(call("checkRecord", "str:" + r.seed, "str:" + JSON.stringify(bad2))));
 console.log("another seed:", JSON.stringify(call("checkRecord", "str:" + "ab".repeat(32), "str:" + JSON.stringify(r.record))));
-call("abandon", "str:" + g0.gameId);
+if (!process.env.KEEP) call("abandon", "str:" + g0.gameId);
+else console.log("kept game", g0.gameId, "claimable", g0.claimable, JSON.stringify(g0.beacon));

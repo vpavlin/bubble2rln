@@ -1,7 +1,11 @@
 #include "bubble_core_impl.h"
+#include "beacon.h"
+#include "claim.h"
 #include "check.h"
 #include "pow.h"
 #include "sim.h"
+
+#include "logos_lp_client.h"
 
 #include <sodium.h>
 #include <nlohmann/json.hpp>
@@ -12,6 +16,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -42,6 +47,16 @@ int64_t nowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+int64_t wallMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+// The LEZ sequencer a game takes its beacon block from. BUBBLE_LEZ_URL overrides it.
+std::string defaultLezUrl() {
+    if (const char* e = std::getenv("BUBBLE_LEZ_URL")) return e;
+    return "https://testnet.lez.logos.co";
+}
+
 std::string hex(const unsigned char* p, size_t n) {
     std::string s(n * 2 + 1, '\0');
     sodium_bin2hex(s.data(), s.size(), p, n);
@@ -60,6 +75,13 @@ constexpr double kTickMs = 1000.0 / kTickHz;
 struct Live {
     std::string id, seedHex;
     unsigned char seed[32];
+    // The claim binding: the beacon block the seed is made from and the game's own key.
+    // Without a beacon (the sequencer unreachable) the game is practice: playable, not claimable.
+    bool claimable = false;
+    std::string beaconWhy;
+    Beacon beacon;
+    unsigned char pk[crypto_sign_PUBLICKEYBYTES];
+    unsigned char sk[crypto_sign_SECRETKEYBYTES];
     Params params;
     PowParams pow;
     std::unique_ptr<Game> game;
@@ -76,6 +98,8 @@ struct Live {
     std::vector<Job> jobs;
     std::string checkState;
     json checkResult;
+    std::string claimState;   // "" | "asking" | "granted" | "refused" | "failed"
+    json claimResult;
     int64_t rateMs = 0;
     uint64_t rateHashes = 0;
     double rate = 0;
@@ -173,6 +197,8 @@ struct Live {
         }
     }
 
+    ~Live() { sodium_memzero(sk, sizeof sk); }
+
     void shutdown() {
         { std::lock_guard<std::mutex> l(m); stop = true; }
         cv.notify_all();
@@ -186,6 +212,9 @@ struct Live {
 struct BubbleCorePrivate {
     std::shared_ptr<Live> live;
     unsigned threads = 1;
+    std::mutex capMu;
+    std::deque<int64_t> accepted;   // when the claims this gifter accepted were verified (the hourly cap)
+    std::unique_ptr<logos::LpClient> allocator;   // membership_allocation_client_module, by name
 };
 
 BubbleCoreImpl::BubbleCoreImpl() : d(new BubbleCorePrivate) {
@@ -206,15 +235,27 @@ std::string BubbleCoreImpl::snapshot() {
 }
 
 std::string BubbleCoreImpl::newGame(const std::string& optionsJson) {
-    (void)optionsJson;
+    json opts = json::parse(optionsJson, nullptr, false);
+    std::string lezUrl = defaultLezUrl();
+    if (opts.is_object() && opts.contains("lezUrl") && opts["lezUrl"].is_string()) lezUrl = opts["lezUrl"];
     if (d->live) { d->live->shutdown(); d->live.reset(); }
     auto g = std::make_shared<Live>();
     unsigned char idb[8];
     randombytes_buf(idb, sizeof idb);
     g->id = hex(idb, sizeof idb);
-    // Step 1: a random seed. With the allocator it becomes H(recent block || membership action).
-    randombytes_buf(g->seed, 32);
-    g->seedHex = hex(g->seed, 32);
+    // The seed comes from the newest LEZ block and this game's key (claim.h), so no game can be
+    // prepared before that block. Without a sequencer the game is practice.
+    crypto_sign_keypair(g->pk, g->sk);
+    std::string why;
+    if (latestBeacon(lezUrl, g->beacon, why)) {
+        g->claimable = true;
+        g->seedHex = gameSeed(g->beacon, g->pk);
+        seedFromHex(g->seedHex, g->seed);
+    } else {
+        g->beaconWhy = "practice game: no LEZ block from " + lezUrl + " (" + why + ")";
+        randombytes_buf(g->seed, 32);
+        g->seedHex = hex(g->seed, 32);
+    }
     g->params = defaultParams();
     g->pow = defaultPow();
     g->game = std::make_unique<Game>(g->seedHex, g->params);
@@ -222,8 +263,10 @@ std::string BubbleCoreImpl::newGame(const std::string& optionsJson) {
     for (unsigned i = 0; i < d->threads; i++) g->workers.emplace_back([g] { g->digest(); });
     g->loop = std::thread([g] { g->run(); });
     d->live = g;
+    json beacon = g->claimable ? json{{"id", g->beacon.id}, {"hash", hex(g->beacon.hash, 32)}, {"ts", g->beacon.tsMs}} : json();
     return json{{"ok", true}, {"gameId", g->id}, {"params", g->params.toJson()}, {"pow", g->pow.toJson()},
-                {"chunks", g->params.chunksNeeded()}, {"threads", d->threads}}.dump();
+                {"chunks", g->params.chunksNeeded()}, {"threads", d->threads}, {"claimable", g->claimable},
+                {"beacon", beacon}, {"why", g->beaconWhy}}.dump();
 }
 
 std::string BubbleCoreImpl::frame(const std::string& gameId, int64_t dx, int64_t dy, const std::string& viewJson) {
@@ -280,7 +323,8 @@ std::string BubbleCoreImpl::frame(const std::string& gameId, int64_t dx, int64_t
                 {"world", {std::lround(cx), std::lround(cy), std::lround(kWorld * s), std::lround(100 * kU * s)}},
                 {"bots", bots}, {"pellets", pellets},
                 {"proofs", {{"found", gm.chunks + ready}, {"need", g->params.chunksNeeded()}, {"queued", (int64_t)g->jobs.size()}, {"hashRate", g->rate}}},
-                {"check", {{"state", g->checkState}, {"result", g->checkResult}}}}.dump();
+                {"check", {{"state", g->checkState}, {"result", g->checkResult}}},
+                {"claimable", g->claimable}, {"claim", {{"state", g->claimState}, {"result", g->claimResult}}}}.dump();
 }
 
 std::string BubbleCoreImpl::abandon(const std::string& gameId) {
@@ -294,8 +338,10 @@ std::string BubbleCoreImpl::record(const std::string& gameId) {
     std::lock_guard<std::mutex> l(g->m);
     Record r = g->rec;
     if (!g->game->over) r.end = g->game->tick;
+    json beacon = g->claimable ? json{{"id", g->beacon.id}, {"hash", hex(g->beacon.hash, 32)}, {"ts", g->beacon.tsMs}} : json();
     return json{{"ok", true}, {"seed", g->seedHex}, {"params", g->params.toJson()}, {"pow", g->pow.toJson()},
-                {"record", r.toJson(g->seedHex)}}.dump();
+                {"record", r.toJson(g->seedHex)}, {"claimable", g->claimable}, {"beacon", beacon},
+                {"gameKey", hex(g->pk, 32)}}.dump();
 }
 
 std::string BubbleCoreImpl::checkRecord(const std::string& seedHex, const std::string& recordJson) {
@@ -303,4 +349,109 @@ std::string BubbleCoreImpl::checkRecord(const std::string& seedHex, const std::s
     if (!rec.is_object()) return json{{"ok", false}, {"reason", "the record is not JSON"}}.dump();
     try { return checkGame(seedHex, defaultParams(), defaultPow(), rec).dump(); }
     catch (const std::exception& e) { return json{{"ok", false}, {"reason", e.what()}}.dump(); }
+}
+
+std::string BubbleCoreImpl::verify_auth(const std::string& requestJson) {
+    json req = json::parse(requestJson, nullptr, false);
+    json cfg = req.is_object() ? req.value("config", json()) : json();
+    GifterRules rules;
+    std::string why;
+    if (!GifterRules::fromJson(cfg, rules, why)) return json{{"error", why}}.dump();
+    json verdict;
+    try {
+        verdict = verifyClaim(req, [&](uint64_t id, Beacon& out, std::string& w, bool& unreachable) {
+            return beaconById(rules.lezUrl, id, out, w, unreachable);
+        }, wallMs());
+    } catch (const std::exception& e) {
+        return json{{"error", std::string("verify_auth: ") + e.what()}}.dump();
+    }
+    // The gifter's hourly cap on accepted claims: the hard bound on what bots can take.
+    if (verdict.value("ok", false) && rules.maxClaimsPerHour > 0) {
+        std::lock_guard<std::mutex> l(d->capMu);
+        const int64_t now = nowMs();
+        while (!d->accepted.empty() && now - d->accepted.front() > 3600 * 1000) d->accepted.pop_front();
+        if ((int)d->accepted.size() >= rules.maxClaimsPerHour)
+            return json{{"ok", false}, {"reason", "this gifter has given its " + std::to_string(rules.maxClaimsPerHour) + " memberships for this hour; try again later"}}.dump();
+        d->accepted.push_back(now);
+    }
+    return verdict.dump();
+}
+
+std::string BubbleCoreImpl::produce_auth(const std::string& requestJson) {
+    json req = json::parse(requestJson, nullptr, false);
+    if (!req.is_object() || !req.contains("action_hex") || !req["action_hex"].is_string() || !req.contains("domain")
+        || !req["domain"].is_string() || req.value("auth_type", std::string()) != kAuthType)
+        return json{{"error", std::string("produce_auth args: need auth_type \"") + kAuthType + "\", domain, action_hex"}}.dump();
+    json args = req.value("args", json::object());
+    if (args.is_string()) args = json::parse(args.get<std::string>(), nullptr, false);
+    if (!args.is_object()) args = json::object();
+    std::string action = req["action_hex"];
+    if (action.rfind("0x", 0) == 0 || action.rfind("0X", 0) == 0) action = action.substr(2);
+    unsigned char act[32];
+    size_t len = 0;
+    if (action.size() != 64 || sodium_hex2bin(act, 32, action.data(), action.size(), nullptr, &len, nullptr) != 0 || len != 32)
+        return json{{"error", "action_hex: expected 64 hex chars (32 bytes)"}}.dump();
+    auto g = d->live;
+    if (!g || (args.contains("gameId") && args["gameId"] != g->id)) return json{{"error", "no such game"}}.dump();
+    std::lock_guard<std::mutex> l(g->m);
+    if (!g->claimable) return json{{"error", g->beaconWhy.empty() ? "a practice game can't be claimed" : g->beaconWhy}}.dump();
+    if (!g->game->won || g->checkState != "done" || !g->checkResult.value("ok", false))
+        return json{{"error", "the game is not won and checked yet"}}.dump();
+    Claim c;
+    c.beaconId = g->beacon.id;
+    memcpy(c.pub, g->pk, 32);
+    c.end = (uint32_t)g->rec.end;
+    if (g->game->digested.size() != g->rec.digests.size()) return json{{"error", "the record and the game disagree"}}.dump();
+    for (size_t i = 0; i < g->rec.digests.size(); i++)
+        c.chunks.push_back({(uint32_t)g->game->digested[i].tick, g->game->digested[i].hash, std::get<2>(g->rec.digests[i])});
+    const std::string audience = args.contains("audience") && args["audience"].is_string() ? args["audience"].get<std::string>() : "";
+    unsigned char digest[32];
+    bindingDigest(req["domain"], kAuthType, act, audience, encodeClaim(c, false), digest);
+    crypto_sign_detached(c.sig, nullptr, digest, 32, g->sk);
+    const auto bytes = encodeClaim(c, true);
+    return json{{"payload_hex", hex(bytes.data(), bytes.size())}}.dump();
+}
+
+std::string BubbleCoreImpl::claim(const std::string& gameId, const std::string& optionsJson) {
+    auto g = d->live;
+    if (!g || g->id != gameId) return json{{"ok", false}, {"error", "no such game"}}.dump();
+    json o = json::parse(optionsJson, nullptr, false);
+    if (!o.is_object() || !o.contains("config") || !o["config"].is_string() || !o.contains("identityCommitment") || !o["identityCommitment"].is_string())
+        return json{{"ok", false}, {"error", "options need config (the registry) and identityCommitment"}}.dump();
+    {
+        std::lock_guard<std::mutex> l(g->m);
+        if (!g->claimable) return json{{"ok", false}, {"error", g->beaconWhy.empty() ? "a practice game can't be claimed" : g->beaconWhy}}.dump();
+        if (!g->game->won || g->checkState != "done" || !g->checkResult.value("ok", false))
+            return json{{"ok", false}, {"error", "the game is not won and checked yet"}}.dump();
+        if (g->claimState == "asking" || g->claimState == "granted") return json{{"ok", true}, {"state", g->claimState}}.dump();
+        g->claimState = "asking";
+        g->claimResult = json();
+    }
+    // The allocator client asks the gifter over libp2p; it calls back our produce_auth for the
+    // payload, and answers once the membership is on chain (up to ~190 s).
+    json args = {{"config", o["config"]}, {"identityCommitment", o["identityCommitment"]}, {"rate", o.value("rate", 100)},
+                 {"authType", kAuthType}, {"authProvider", moduleName().empty() ? std::string("bubble_core") : moduleName()},
+                 {"authArgs", {{"gameId", gameId}, {"audience", o.value("audience", std::string())}}},
+                 {"discover", o.value("discover", !o.contains("allocatorPeerId"))}};
+    if (o.contains("allocatorPeerId")) { args["allocatorPeerId"] = o["allocatorPeerId"]; args["allocatorMultiaddr"] = o.value("allocatorMultiaddr", std::string()); }
+    if (!d->allocator) d->allocator = std::make_unique<logos::LpClient>("membership_allocation_client_module", moduleName().empty() ? std::string("bubble_core") : moduleName());
+    std::weak_ptr<Live> weak = g;
+    d->allocator->invokeAsync("request", json::array({args.dump()}), [weak](json r) {
+        auto g = weak.lock();
+        if (!g) return;
+        json reply = r.is_string() ? json::parse(r.get<std::string>(), nullptr, false) : r;
+        std::lock_guard<std::mutex> l(g->m);
+        if (reply.is_object() && reply.contains("leaf_index")) g->claimState = "granted";
+        else if (reply.is_object() && reply.value("kind", std::string()) == "refused") g->claimState = "refused";
+        else g->claimState = "failed";
+        g->claimResult = reply.is_discarded() || reply.is_null() ? json{{"error", "no reply from membership_allocation_client_module"}} : reply;
+    }, 240000);
+    return json{{"ok", true}, {"state", "asking"}}.dump();
+}
+
+std::string BubbleCoreImpl::claimStatus(const std::string& gameId) {
+    auto g = d->live;
+    if (!g || g->id != gameId) return json{{"ok", false}, {"error", "no such game"}}.dump();
+    std::lock_guard<std::mutex> l(g->m);
+    return json{{"ok", true}, {"state", g->claimState}, {"result", g->claimResult}}.dump();
 }

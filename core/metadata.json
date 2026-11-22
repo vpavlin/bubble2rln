@@ -12,10 +12,12 @@
   "nix": {
     "packages": {
       "build": [
-        "libsodium"
+        "libsodium",
+        "curl"
       ],
       "runtime": [
-        "libsodium"
+        "libsodium",
+        "curl"
       ]
     },
     "external_libraries": [],

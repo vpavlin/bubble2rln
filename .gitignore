@@ -6,3 +6,5 @@ result*
 brand.py
 ui/harness/harness
 ui/harness/harness.moc
+spike/powbench/powbench-arm64
+spike/zk/cg.*

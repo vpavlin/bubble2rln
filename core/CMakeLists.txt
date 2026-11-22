@@ -23,6 +23,10 @@ logos_module(
         src/check.cpp
         src/pow.h
         src/pow.cpp
+        src/claim.h
+        src/claim.cpp
+        src/beacon.h
+        src/beacon.cpp
     INCLUDE_DIRS src
 )
 
@@ -30,3 +34,6 @@ find_path(SODIUM_INCLUDE_DIR sodium.h REQUIRED)
 find_library(SODIUM_LIBRARY NAMES sodium libsodium REQUIRED)
 target_include_directories(${MODULE_NAME}_module_plugin PRIVATE ${SODIUM_INCLUDE_DIR})
 target_link_libraries(${MODULE_NAME}_module_plugin PRIVATE ${SODIUM_LIBRARY})
+
+find_package(CURL REQUIRED)
+target_link_libraries(${MODULE_NAME}_module_plugin PRIVATE CURL::libcurl)

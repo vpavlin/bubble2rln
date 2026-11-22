@@ -47,6 +47,23 @@ public:
     // Check any record against this module's rules: {"ok", "reason", ...} (for tests and tools).
     std::string checkRecord(const std::string& seedHex, const std::string& recordJson);
 
+    // Claim an RLN membership with the won game, in the background (poll claimStatus or frame).
+    // optionsJson: {"config": registry, "identityCommitment": 64 hex, "rate"?, "allocatorPeerId"?,
+    // "allocatorMultiaddr"?, "audience"?} -> {"ok", "state"}. Asks membership_allocation_client_module.
+    std::string claim(const std::string& gameId, const std::string& optionsJson);
+
+    // The claim's state: {"ok", "state": "" | "asking" | "granted" | "refused" | "failed", "result"}.
+    std::string claimStatus(const std::string& gameId);
+
+    // The allocator's auth vector "bubble-play" (claim.h), the gifter's side: check a claim.
+    // requestJson: {"auth_type", "payload_hex", "domain", "action_hex", "config"?, "peer_id"?}
+    // -> {"ok", "reason"?, "nullifier"?, "identity"?, "scheme"?} or {"error"}.
+    std::string verify_auth(const std::string& requestJson);
+
+    // The player's side: the claim payload of the current won game, signed for this action.
+    // requestJson: {"auth_type", "domain", "action_hex", "args"?: {"gameId"?, "audience"?}} -> {"payload_hex"} or {"error"}.
+    std::string produce_auth(const std::string& requestJson);
+
 private:
     BubbleCorePrivate* d;
 };
