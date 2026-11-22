@@ -51,6 +51,18 @@ int64_t wallMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
+// The gifter this build claims from by default: its libp2p peer id and address, and the
+// registry (config account, base58) it serves. BUBBLE_GIFTER_PEER / BUBBLE_GIFTER_ADDR /
+// BUBBLE_REGISTRY override them; claim()'s options override everything.
+struct GifterDefaults { std::string peer, addr, registry; };
+GifterDefaults gifterDefaults() {
+    GifterDefaults g;
+    if (const char* e = std::getenv("BUBBLE_GIFTER_PEER")) g.peer = e;
+    if (const char* e = std::getenv("BUBBLE_GIFTER_ADDR")) g.addr = e;
+    if (const char* e = std::getenv("BUBBLE_REGISTRY")) g.registry = e;
+    return g;
+}
+
 // The LEZ sequencer a game takes its beacon block from. BUBBLE_LEZ_URL overrides it.
 std::string defaultLezUrl() {
     if (const char* e = std::getenv("BUBBLE_LEZ_URL")) return e;
@@ -215,6 +227,7 @@ struct BubbleCorePrivate {
     std::mutex capMu;
     std::deque<int64_t> accepted;   // when the claims this gifter accepted were verified (the hourly cap)
     std::unique_ptr<logos::LpClient> allocator;   // membership_allocation_client_module, by name
+    std::unique_ptr<logos::LpClient> libp2p;      // libp2p_module, by name
 };
 
 BubbleCoreImpl::BubbleCoreImpl() : d(new BubbleCorePrivate) {
@@ -229,7 +242,9 @@ BubbleCoreImpl::~BubbleCoreImpl() {
 }
 
 std::string BubbleCoreImpl::snapshot() {
-    json j = {{"ok", true}, {"params", defaultParams().toJson()}, {"pow", defaultPow().toJson()}, {"threads", d->threads}};
+    const GifterDefaults gd = gifterDefaults();
+    json j = {{"ok", true}, {"params", defaultParams().toJson()}, {"pow", defaultPow().toJson()}, {"threads", d->threads},
+              {"gifter", {{"peer", gd.peer}, {"addr", gd.addr}, {"registry", gd.registry}}}};
     if (d->live) j["gameId"] = d->live->id;
     return j.dump();
 }
@@ -416,8 +431,22 @@ std::string BubbleCoreImpl::claim(const std::string& gameId, const std::string& 
     auto g = d->live;
     if (!g || g->id != gameId) return json{{"ok", false}, {"error", "no such game"}}.dump();
     json o = json::parse(optionsJson, nullptr, false);
-    if (!o.is_object() || !o.contains("config") || !o["config"].is_string() || !o.contains("identityCommitment") || !o["identityCommitment"].is_string())
-        return json{{"ok", false}, {"error", "options need config (the registry) and identityCommitment"}}.dump();
+    if (!o.is_object()) o = json::object();
+    const GifterDefaults gd = gifterDefaults();
+    if (!o.contains("config") && !gd.registry.empty()) o["config"] = gd.registry;
+    if (!o.contains("allocatorPeerId") && !gd.peer.empty()) { o["allocatorPeerId"] = gd.peer; o["allocatorMultiaddr"] = gd.addr; }
+    if (!o.contains("config") || !o["config"].is_string() || o["config"].get<std::string>().empty())
+        return json{{"ok", false}, {"error", "no gifter is configured (set BUBBLE_REGISTRY and BUBBLE_GIFTER_PEER/ADDR)"}}.dump();
+    // Without an identity of the player's own, a demo one: a random commitment, so the
+    // membership is real on the registry but has no secret behind it to send with.
+    bool demoIdentity = false;
+    if (!o.contains("identityCommitment") || !o["identityCommitment"].is_string()) {
+        unsigned char idc[32];
+        randombytes_buf(idc, 31);
+        idc[31] = 0;   // little-endian below 2^248 < the BN254 modulus
+        o["identityCommitment"] = hex(idc, 32);
+        demoIdentity = true;
+    }
     {
         std::lock_guard<std::mutex> l(g->m);
         if (!g->claimable) return json{{"ok", false}, {"error", g->beaconWhy.empty() ? "a practice game can't be claimed" : g->beaconWhy}}.dump();
@@ -434,8 +463,17 @@ std::string BubbleCoreImpl::claim(const std::string& gameId, const std::string& 
                  {"authArgs", {{"gameId", gameId}, {"audience", o.value("audience", std::string())}}},
                  {"discover", o.value("discover", !o.contains("allocatorPeerId"))}};
     if (o.contains("allocatorPeerId")) { args["allocatorPeerId"] = o["allocatorPeerId"]; args["allocatorMultiaddr"] = o.value("allocatorMultiaddr", std::string()); }
-    if (!d->allocator) d->allocator = std::make_unique<logos::LpClient>("membership_allocation_client_module", moduleName().empty() ? std::string("bubble_core") : moduleName());
+    const std::string me = moduleName().empty() ? std::string("bubble_core") : moduleName();
+    if (!d->allocator) d->allocator = std::make_unique<logos::LpClient>("membership_allocation_client_module", me);
+    if (!d->libp2p) d->libp2p = std::make_unique<logos::LpClient>("libp2p_module", me);
     std::weak_ptr<Live> weak = g;
+    {
+        std::lock_guard<std::mutex> l(g->m);
+        g->claimResult = json{{"demoIdentity", demoIdentity}, {"identityCommitment", o["identityCommitment"]}};
+    }
+    // The claim travels over this node's libp2p node: make sure it runs ("already started" is fine).
+    logos::CallError ignored;
+    d->libp2p->invoke("start", json::array(), &ignored, 20000);
     d->allocator->invokeAsync("request", json::array({args.dump()}), [weak](json r) {
         auto g = weak.lock();
         if (!g) return;
@@ -444,7 +482,19 @@ std::string BubbleCoreImpl::claim(const std::string& gameId, const std::string& 
         if (reply.is_object() && reply.contains("leaf_index")) g->claimState = "granted";
         else if (reply.is_object() && reply.value("kind", std::string()) == "refused") g->claimState = "refused";
         else g->claimState = "failed";
+        const bool demo = g->claimResult.value("demoIdentity", false);
         g->claimResult = reply.is_discarded() || reply.is_null() ? json{{"error", "no reply from membership_allocation_client_module"}} : reply;
+        g->claimResult["demoIdentity"] = demo;
+        // What to tell the player, in words (the view shows "message").
+        const std::string reason = reply.is_object() ? reply.value("reason", std::string()) : "";
+        const std::string err = reply.is_object() ? reply.value("error", std::string()) : "";
+        std::string msg;
+        if (g->claimState == "granted") msg = "";
+        else if (reason == "credential_used") msg = "This game has already been claimed. Play another one to claim again.";
+        else if (reply.is_object() && reply.value("kind", std::string()) == "no_provider") msg = "No gifter answered. It may be offline; try again later.";
+        else if (reply.is_object() && reply.value("kind", std::string()) == "unconfirmed") msg = "The gifter sent your registration, but the chain had not confirmed it in time. It may still land.";
+        else msg = err.empty() ? (reason.empty() ? "no reason given" : reason) : err;
+        if (!msg.empty()) g->claimResult["message"] = msg;
     }, 240000);
     return json{{"ok", true}, {"state", "asking"}}.dump();
 }

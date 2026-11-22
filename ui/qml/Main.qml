@@ -60,19 +60,39 @@ Item {
     property real mouseY: -1
     property var keys: ({})
     property bool autopilot: false      // tests only (the harness sets it): head for the nearest dot
+    property var claim: ({ state: "", result: null })   // claimStatus's reply: "" | asking | granted | refused | failed
+    property bool claimable: false      // the game is seeded from a LEZ block (newGame's reply)
     readonly property bool playing: root.screen === "play" || root.screen === "checking"
     readonly property bool activeNow: Qt.application.state === Qt.ApplicationActive && root.visible
 
     function startGame() {
-        root.screen = "starting"; root.message = ""; root.fr = null
+        root.screen = "starting"; root.message = ""; root.fr = null; root.claim = { state: "", result: null }
         callVia("newGame", ["{}"], function (raw) {
             var r = root.parse(raw)
             if (!r || !r.ok) { root.screen = "start"; root.message = (r && r.error) || "bubble_core did not answer."; return }
             root.info = r
+            root.claimable = !!r.claimable
             root.screen = "play"
             root.forceActiveFocus()
         })
     }
+
+    function claimMembership() {
+        if (!root.info) return
+        root.claim = { state: "asking", result: null }
+        callVia("claim", [root.info.gameId, "{}"], function (raw) {
+            const r = root.parse(raw)
+            if (!r || !r.ok) root.claim = { state: "failed", result: { error: r && r.error ? r.error : "the claim could not start" } }
+        })
+    }
+    function pollClaim() {
+        if (!root.info) return
+        callVia("claimStatus", [root.info.gameId], function (raw) {
+            const r = root.parse(raw)
+            if (r && r.ok && r.state !== "") root.claim = { state: r.state, result: r.result }
+        })
+    }
+    Timer { interval: 2000; repeat: true; running: root.screen === "won" && root.claim.state === "asking" && root.activeNow; onTriggered: root.pollClaim() }
 
     function giveUp() {
         if (!root.info || root.screen !== "play") return
@@ -262,7 +282,21 @@ Item {
                     visible: root.screen === "won"
                     readonly property var r: root.fr && root.fr.check ? root.fr.check.result : null
                     text: r ? ("Size " + r.body + " in " + Math.round(r.ticks / 30) + " s, " + r.chunks + " proofs of work, all checked"
-                        + (r.deaths ? (", eaten " + r.deaths + "×") : "") + ". Claiming the membership arrives in the next version; your game is ready for it.") : ""
+                        + (r.deaths ? (", eaten " + r.deaths + "×") : "") + ".") : ""
+                }
+                // The claim: the game's proofs go to the gifter, which checks them and registers an RLN membership.
+                Text {
+                    Layout.fillWidth: true; font.pixelSize: 14; wrapMode: Text.Wrap; textFormat: Text.StyledText
+                    visible: root.screen === "won"
+                    readonly property var c: root.claim
+                    readonly property var res: c.result || ({})
+                    color: c.state === "granted" ? root.cOk : (c.state === "refused" || c.state === "failed") ? root.cBad : root.cSub
+                    text: !root.claimable ? "This was a practice game (no LEZ block to seed it from), so it can't be claimed."
+                        : c.state === "" ? "Claim your <b>RLN membership</b>: the gifter checks your proofs of work and registers you, 100 messages every 10 minutes."
+                        : c.state === "asking" ? "Asking the gifter… it checks your proofs, then registers the membership on chain (up to a few minutes)."
+                        : c.state === "granted" ? ("Membership <b>#" + res.leaf_index + "</b> registered" + (res.tx_hash ? " (tx " + String(res.tx_hash).slice(0, 12) + "…)" : "")
+                            + (res.demoIdentity ? ".<br>Demo identity: it is real on the registry, but this build has no RLN key of yours to send with." : "."))
+                        : (res.message || res.error || "The claim failed.")
                 }
                 Text {
                     Layout.fillWidth: true; color: root.screen === "over" ? root.cSub : root.cBad; font.pixelSize: 14; wrapMode: Text.Wrap
@@ -271,6 +305,12 @@ Item {
                 }
                 RowLayout {
                     spacing: 10
+                    LogosButton {
+                        visible: root.screen === "won" && root.claimable && root.claim.state !== "granted"
+                        text: root.claim.state === "asking" ? "Claiming…" : root.claim.state === "" ? "Claim membership" : "Try again"
+                        enabled: root.claim.state !== "asking"
+                        onClicked: root.claimMembership()
+                    }
                     LogosButton {
                         text: root.screen === "starting" ? "Starting…" : (root.screen === "start" ? "Play" : "Play again")
                         enabled: root.screen !== "starting" && root.screen !== "checking"

@@ -48,8 +48,9 @@ public:
     std::string checkRecord(const std::string& seedHex, const std::string& recordJson);
 
     // Claim an RLN membership with the won game, in the background (poll claimStatus or frame).
-    // optionsJson: {"config": registry, "identityCommitment": 64 hex, "rate"?, "allocatorPeerId"?,
-    // "allocatorMultiaddr"?, "audience"?} -> {"ok", "state"}. Asks membership_allocation_client_module.
+    // optionsJson: {"config"?: registry, "identityCommitment"?: 64 hex, "rate"?, "allocatorPeerId"?,
+    // "allocatorMultiaddr"?, "audience"?} -> {"ok", "state"}; the gifter defaults to this build's
+    // (snapshot's "gifter"), the identity to a demo one. Asks membership_allocation_client_module.
     std::string claim(const std::string& gameId, const std::string& optionsJson);
 
     // The claim's state: {"ok", "state": "" | "asking" | "granted" | "refused" | "failed", "result"}.

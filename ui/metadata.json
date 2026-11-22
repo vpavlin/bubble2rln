@@ -2,13 +2,14 @@
   "name": "bubble",
   "display_name": "Bubble",
   "icon": "icon.png",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "ui_qml",
   "category": "games",
   "description": "Grow from a small bubble by eating smaller ones; digest with proof of work; reach the goal to claim an RLN membership for Logos Messaging",
   "view": "qml/Main.qml",
   "dependencies": [
-    "bubble_core"
+    "bubble_core",
+    "membership_allocation_client_module"
   ],
   "nix": {
     "packages": {

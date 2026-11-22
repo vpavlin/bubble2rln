@@ -7,6 +7,8 @@
     # The core this view was built and tested with (a path:../core input can't be fetched by CI).
     bubble_core.url = "github:vpavlin/bubble2rln/84296f0d5f3d35298fc18e58bb15b833abf90bf7?dir=core";
     bubble_core.inputs.logos-module-builder.follows = "logos-module-builder";
+    # The RLN membership allocator's client: the claim goes through it (and it brings libp2p_module).
+    membership_allocation_client_module.url = "github:logos-co/logos-membership-allocation-client-module/d8286f4072197952d4f7b575fbc2b4894074ec22";
   };
 
   outputs = inputs@{ logos-module-builder, ... }:
