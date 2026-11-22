@@ -20,9 +20,9 @@ side.
     of work, can be prepared before that block exists.
   - The game makes its own Ed25519 key at the start. It signs the claim, so a claim can't be
     re-aimed at another membership, and nobody without the key can claim the game.
-- **Digestion proofs**: 38 argon2id proofs (8 MiB, 1 pass), one per 5 mass digested, each bound
+- **Digestion proofs**: 58 argon2id proofs (8 MiB, 1 pass; goal 300 from 10), one per 5 mass digested, each bound
   to the seed, the chunk, and the tick and game state at which the chunk was swallowed.
-- **Payload** (binary, 569 bytes): beacon id, game key, game length, 38 × (tick, state, nonce),
+- **Payload** (binary, 809 bytes): beacon id, game key, game length, 58 × (tick, state, nonce),
   and the signature over the allocator's binding digest (domain, auth type, action = the
   identity commitment and rate, audience, and the payload itself).
 - **Nullifier** = the seed: one membership per game, enforced by the allocator's nullifier store.
@@ -38,8 +38,8 @@ Cheapest first:
 4. every proof of work, in random order, so a partly computed claim fails early;
 5. the hourly cap (`maxClaimsPerHour`): the hard bound on what bots can take.
 
-Measured on crib: an honest claim checks in **~213 ms** (38 argon2id); a claim with no work in
-it is refused in **~6 ms**.
+Measured on crib: an honest claim checks in **~340 ms** (58 argon2id; ~213 ms for the first
+version's 38); a claim with no work in it is refused in **~6 ms**.
 
 ## The price
 
@@ -53,13 +53,16 @@ Hashes per second, argon2id 8 MiB (measured 2026-11-22):
 
 The hash is memory-bound: more than 2 threads gains little on these machines.
 
-At difficulty *bits*, a game costs 38 × 2^bits hashes on average:
+At difficulty *bits*, a game costs 58 × 2^bits hashes on average:
 
 | bits | hashes | crib (2 thr) | pi5 (2 thr) | a bot, per membership |
 |---|---|---|---|---|
-| 10 | 38,912 | ~2.2 min | ~4.3 min | ~3.7 CPU-min |
-| 11 | 77,824 | ~4.3 min | ~8.6 min | ~7.3 CPU-min |
-| 12 | 155,648 | ~8.6 min | ~17 min | ~15 CPU-min |
+| 10 | 59,392 | ~3.3 min | ~6.6 min | ~5.6 CPU-min |
+| 11 | 118,784 | ~6.6 min | ~13 min | ~11 CPU-min |
+| 12 | 237,568 | ~13 min | ~26 min | ~22 CPU-min |
+
+(The goal was 200, 38 proofs, until vpavlin finished a game in 160 s; at 300 a game takes
+about 4–5 minutes.)
 
 The proofs are computed while the player plays (digestion starts when food is swallowed), so at
 bits 10 most of the work hides in a 3–5 minute game on a laptop.
@@ -140,5 +143,15 @@ bridge working (≈1 h to finality) and on testnet stability on the day.
 Recommendation: build A as the safe demo (Monday), try B's bridge in parallel; if B works by
 Tuesday, demo B and keep A as the fallback.
 
-Settings for the demo: 38 proofs at bits 10 (a 3–5 minute game on a laptop), beacon age ≤ 1 h,
+Settings for the demo: 58 proofs at bits 10 (a 4–5 minute game on a laptop), beacon age ≤ 1 h,
 20 memberships/hour cap, rate 100/epoch.
+
+## The public gifter (VPS, 2026-11-22)
+
+The chain and the gifter run on the VPS as systemd units (`deploy/vps`): a standalone LEZ
+sequencer with the RLN registry (`APtni2RgeHkW6HChE1VL1jgdnUr1jyd1smV13JjDPk74`, RPC on
+localhost only) and the gifter (peer `16Uiu2HAkx4HRjCAN4HCWZyqXn7ZxnDGhxQhcpDuBhANBhx3VXP88`,
+`/ip4/128.140.55.128/tcp/9101`, fixed key, 20 claims/hour). bubble_core 0.2.0 claims from it by
+default with the demo identity, so the Claim button works in any Basecamp with no setup. A full
+game played on crib was granted by it over the internet. For testnet only the chain part
+changes: the gifter points its rln_lez_module at the testnet registry with a funded payer.

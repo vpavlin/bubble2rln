@@ -14,6 +14,6 @@ $CTL module load rln_lez_module
 $CTL module load membership_allocation_module
 serve=$(python3 -c "import json; print(json.dumps({'config': '$REGISTRY', 'advertise': False,
     'consumedNullifiersPath': '$G/nullifiers.json',
-    'authVerifiers': {'bubble-play': {'module': 'bubble_core', 'config': {'maxBeaconAgeS': 3600, 'maxClaimsPerHour': $MAX_PER_HOUR}}}}))")
+    'authVerifiers': {'bubble-play': {'module': 'bubble_core', 'config': {'maxBeaconAgeS': 3600, 'maxClaimsPerHour': $MAX_PER_HOUR, 'lezUrl': 'http://127.0.0.1:3040/'}}}}))")
 call membership_allocation_module serve "str:$serve"
 call libp2p_module getNodeInfo str:PeerId

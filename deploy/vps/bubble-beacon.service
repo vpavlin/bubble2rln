@@ -1,0 +1,12 @@
+[Unit]
+Description=Bubble beacon: read-only getLastBlockId/getBlock of the gifter's chain (public tcp/3041)
+After=bubble-chain.service
+Requires=bubble-chain.service
+
+[Service]
+ExecStart=/usr/bin/python3 /root/bubble-gifter/beacon-proxy.py 3041 http://127.0.0.1:3040/
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

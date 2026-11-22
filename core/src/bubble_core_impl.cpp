@@ -77,7 +77,10 @@ GifterDefaults gifterDefaults() {
 // The LEZ sequencer a game takes its beacon block from. BUBBLE_LEZ_URL overrides it.
 std::string defaultLezUrl() {
     if (const char* e = std::getenv("BUBBLE_LEZ_URL")) return e;
-    return "https://testnet.lez.logos.co";
+    // The default gifter's own chain, through its read-only beacon proxy (deploy/vps): one
+    // dependency for the claim instead of two. (The LEZ testnet rewrote blocks under a game
+    // on 2026-11-22: a game seeded from a block that later changes can never be claimed.)
+    return "http://128.140.55.128:3041/";
 }
 
 std::string hex(const unsigned char* p, size_t n) {

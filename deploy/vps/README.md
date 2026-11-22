@@ -12,5 +12,8 @@ Two systemd units on the VPS, under `/root/bubble-gifter`:
   `bubble-play` verifier, and rln_lez_module registering on the chain above.
   `after-start` loads and configures everything once the daemon is up.
 
-Players reach only the gifter (libp2p). The chain stays private: with the demo identity the
+- `bubble-beacon.service`: `beacon-proxy.py`, public tcp/3041: only getLastBlockId and getBlock
+  of the chain, for the games' beacon blocks (bubble_core's default `BUBBLE_LEZ_URL`).
+
+Players reach the gifter (libp2p) and the beacon proxy. The rest of the chain stays private: with the demo identity the
 player needs nothing from it; the player's own RLN identity needs the testnet registry.
