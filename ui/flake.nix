@@ -5,7 +5,7 @@
     # Same builder as the core (Basecamp 0.3.x).
     logos-module-builder.url = "github:logos-co/logos-module-builder/0.3.1";
     # The core this view was built and tested with (a path:../core input can't be fetched by CI).
-    bubble_core.url = "github:vpavlin/bubble2rln/5f0960987b48cae36e1a4779bfbb93db5add0287?dir=core";
+    bubble_core.url = "github:vpavlin/bubble2rln/e73f9a17e6db65d609521cc95d93b6913589599e?dir=core";
     bubble_core.inputs.logos-module-builder.follows = "logos-module-builder";
     # The RLN membership allocator's client: the claim goes through it (and it brings libp2p_module).
     membership_allocation_client_module.url = "github:logos-co/logos-membership-allocation-client-module/d8286f4072197952d4f7b575fbc2b4894074ec22";
