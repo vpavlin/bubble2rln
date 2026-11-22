@@ -102,6 +102,15 @@ L1 node could bridge only to that zone, while the registry lived elsewhere; now 
 same. Atlas's mined testnet balance (~1.26e9 units in October) covers ~15 registrations at
 ~74M each. Not done: bridging moves real (testnet) funds and is your call.
 
+**Local chain end to end (2026-11-22, `scripts/local-registry.sh` on Atlas + `scripts/claim-e2e.sh`
+on crib, through an ssh tunnel to the sequencer):** a game seeded from a LEZ testnet block, won,
+claimed from inside bubble_core → client → libp2p → allocator → `verify_auth` accepted →
+`rln_lez_module.register_member` on the local registry → **granted, leaf 0**, membership
+`active`, rate 100, active 30 days + 7 days grace (the registry's durations, the same shape as
+the testnet registry). The same game claimed again for another identity: refused in 0.3 s,
+`credential already used`. Gotcha: the wallet the gifter's `rln_lez_module` adopts must carry
+`gas_limit: 10000000` (a registration needs ~9.1M cycles; without it: `would_revert`).
+
 ## For Wednesday: two ways to demo
 
 **A. Local chain (no funds, fully ours).** The LEZ sequencer + RLN registry run on Atlas; the
