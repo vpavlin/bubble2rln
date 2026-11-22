@@ -42,10 +42,13 @@ JSON
     lines=$("$BIN/mint_payer")
     PAYER=$(echo "$lines" | sed -n 1p); PAYER_PK=$(echo "$lines" | sed -n 2p)
     echo "payer $PAYER (public key $PAYER_PK)"
+    # Optimized, with 2 s blocks: the debug build at dev.sh's 1 s blocks answers RPC in ~15 s,
+    # and the gifter's wallet times out. (A restart wipes the chain: deploy again.)
     LEZ_RLN_PORT=$PORT LEZ_RLN_SEQUENCER_HOME=$DEVNET/sequencer LEZ_RLN_GENESIS_FUND=$PAYER_PK \
+        LEZ_RLN_BLOCK_TIME=${BLOCK_TIME:-2s} CARGO_PROFILE_DEV_OPT_LEVEL=${OPT_LEVEL:-3} \
         nohup "$REPO/dev.sh" > "$DEVNET/sequencer.log" 2>&1 < /dev/null &
     echo "sequencer starting (log $DEVNET/sequencer.log)"
-    for i in $(seq 1 200); do up >/dev/null && break; sleep 3; done
+    for i in $(seq 1 600); do up >/dev/null && break; sleep 3; done
     echo "sequencer up at block $(up)"
 }
 

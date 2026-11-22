@@ -12,6 +12,9 @@
 #   RLN_LEZ_LGX   rln_lez_module to load on the gifter (unset = no registration: the claim is
 #                 verified, then waits for a registry module that never comes)
 #   GIFTER_ENV    extra env for the gifter daemon (e.g. LEZ_RLN_SEQUENCER=… LEZ_RLN_PAYER_KEY=…)
+#   RLN_MODULE_LGX  rln_module for the player: the claim then uses the player's own RLN identity
+#                 (needs RLN_LEZ_LGX too; PLAYER_ENV points its rln_lez_module at the chain,
+#                 e.g. LEZ_RLN_SEQUENCER=http://127.0.0.1:3040/; NETWORK names it, default local)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CTL=${CTL:-$HOME/port-0.3/ctl.sh}
@@ -29,12 +32,13 @@ result() { python3 -c 'import json,sys; o=json.loads(sys.stdin.read()); r=o.get(
 
 up() {
     env ${GIFTER_ENV:-} "$CTL" gift daemon start --detach | tail -1
-    BUBBLE_LEZ_URL=$LEZ_URL BUBBLE_GOAL=$GOAL BUBBLE_MIN_TICKS=$MIN_TICKS BUBBLE_POW_BITS=$BITS BUBBLE_PAUSE_MS=5000 \
+    env ${PLAYER_ENV:-} BUBBLE_LEZ_URL=$LEZ_URL BUBBLE_GOAL=$GOAL BUBBLE_MIN_TICKS=$MIN_TICKS BUBBLE_POW_BITS=$BITS BUBBLE_PAUSE_MS=5000 \
         "$CTL" play daemon start --detach | tail -1
     for s in gift play; do "$CTL" $s package install -y libp2p_module >/dev/null; "$CTL" $s install "$CORE_LGX" -y >/dev/null; done
     "$CTL" gift install "$ALLOC_LGX" -y >/dev/null
     "$CTL" play install "$CLIENT_LGX" -y >/dev/null
     if [ -n "${RLN_LEZ_LGX:-}" ]; then "$CTL" gift install "$RLN_LEZ_LGX" -y >/dev/null; fi
+    if [ -n "${RLN_MODULE_LGX:-}" ]; then "$CTL" play install "$RLN_LEZ_LGX" -y >/dev/null; "$CTL" play install "$RLN_MODULE_LGX" -y >/dev/null; fi
     local port=9101 peer
     for s in gift play; do
         "$CTL" $s module load libp2p_module >/dev/null
@@ -47,6 +51,7 @@ up() {
     if [ -n "${RLN_LEZ_LGX:-}" ]; then "$CTL" gift module load rln_lez_module >/dev/null; fi
     "$CTL" gift module load membership_allocation_module >/dev/null
     "$CTL" play module load membership_allocation_client_module >/dev/null
+    if [ -n "${RLN_MODULE_LGX:-}" ]; then "$CTL" play module load rln_lez_module >/dev/null; "$CTL" play module load rln_module >/dev/null; fi
     local serve
     serve=$(python3 -c "import json; print(json.dumps({'config': '$REGISTRY', 'advertise': False,
         'consumedNullifiersPath': '$HOME/port-0.3/sess-gift/nullifiers.json',
@@ -66,10 +71,12 @@ claim() {
     . "$STATE"
     local idc opts r
     idc=$(python3 -c "import os; print((os.urandom(31) + b'\x00').hex())")   # a valid BN254 element, little-endian
-    opts=$(python3 -c "import json; print(json.dumps({'config': '$REGISTRY', 'identityCommitment': '$idc', 'rate': 100,
-        'allocatorPeerId': '$peer', 'allocatorMultiaddr': '/ip4/127.0.0.1/tcp/9101'}))")
+    opts=$(python3 -c "import json; o = {'config': '$REGISTRY', 'identityCommitment': '$idc', 'rate': 100,
+        'allocatorPeerId': '$peer', 'allocatorMultiaddr': '/ip4/127.0.0.1/tcp/9101'}
+if '${RLN_MODULE_LGX:-}': o.update({'identity': 'rln', 'network': '${NETWORK:-local}'}); del o['identityCommitment']
+print(json.dumps(o))")
     echo "claim: $(call play bubble_core claim "str:$game" "str:$opts" | result)"
-    for i in $(seq 1 60); do
+    for i in $(seq 1 90); do
         r=$(call play bubble_core claimStatus "str:$game" | result)
         case "$r" in *'"state":"asking"'*) sleep 5 ;; *) break ;; esac
     done

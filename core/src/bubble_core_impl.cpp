@@ -54,9 +54,13 @@ int64_t wallMs() {
 // The gifter this build claims from by default: its libp2p peer id and address, and the
 // registry (config account, base58) it serves. BUBBLE_GIFTER_PEER / BUBBLE_GIFTER_ADDR /
 // BUBBLE_REGISTRY override them; claim()'s options override everything.
-struct GifterDefaults { std::string peer, addr, registry; };
+struct GifterDefaults { std::string peer, addr, registry, network = "testnet", identity = "demo"; };
 GifterDefaults gifterDefaults() {
     GifterDefaults g;
+    // BUBBLE_IDENTITY=rln claims with the player's own RLN identity (rln_module), on
+    // BUBBLE_NETWORK's registry ("testnet" = the logos.test one; "local" = a devnet).
+    if (const char* e = std::getenv("BUBBLE_IDENTITY")) g.identity = e;
+    if (const char* e = std::getenv("BUBBLE_NETWORK")) g.network = e;
     if (const char* e = std::getenv("BUBBLE_GIFTER_PEER")) g.peer = e;
     if (const char* e = std::getenv("BUBBLE_GIFTER_ADDR")) g.addr = e;
     if (const char* e = std::getenv("BUBBLE_REGISTRY")) g.registry = e;
@@ -83,6 +87,32 @@ int64_t pauseAfterMs() {
     return v;
 }
 constexpr double kTickMs = 1000.0 / kTickHz;
+
+// Logos Delivery's RLN application identifier (logos-delivery-module rln_presets.h): a
+// membership registered under it is the one the player's Delivery node proves with.
+constexpr const char* kDeliveryRlnIdentifier = "5e269b6a19fce081f5808b13442dcbc3522197638dd38df5a28bc4e55236b977";
+
+// base58 (bitcoin alphabet) of a 32-byte account id -> 64 hex; "" if it isn't one.
+std::string b58ToHex32(const std::string& b58) {
+    static const std::string alpha = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    std::vector<unsigned char> n(32, 0);
+    for (char ch : b58) {
+        size_t v = alpha.find(ch);
+        if (v == std::string::npos) return "";
+        unsigned carry = (unsigned)v;
+        for (int i = 31; i >= 0; i--) { carry += 58u * n[i]; n[i] = carry & 0xff; carry >>= 8; }
+        if (carry) return "";
+    }
+    std::string out(65, '\0');
+    sodium_bin2hex(out.data(), out.size(), n.data(), 32);
+    out.resize(64);
+    return out;
+}
+
+json parseReply(const json& r) {
+    if (r.is_string()) return json::parse(r.get<std::string>(), nullptr, false);
+    return r;
+}
 
 struct Live {
     std::string id, seedHex;
@@ -228,6 +258,8 @@ struct BubbleCorePrivate {
     std::deque<int64_t> accepted;   // when the claims this gifter accepted were verified (the hourly cap)
     std::unique_ptr<logos::LpClient> allocator;   // membership_allocation_client_module, by name
     std::unique_ptr<logos::LpClient> libp2p;      // libp2p_module, by name
+    std::unique_ptr<logos::LpClient> rln;         // rln_module, by name (the player's own RLN identity)
+    std::vector<std::thread> claimThreads;
 };
 
 BubbleCoreImpl::BubbleCoreImpl() : d(new BubbleCorePrivate) {
@@ -238,6 +270,7 @@ BubbleCoreImpl::BubbleCoreImpl() : d(new BubbleCorePrivate) {
 
 BubbleCoreImpl::~BubbleCoreImpl() {
     if (d->live) d->live->shutdown();
+    for (auto& t : d->claimThreads) if (t.joinable()) t.join();
     delete d;
 }
 
@@ -427,6 +460,81 @@ std::string BubbleCoreImpl::produce_auth(const std::string& requestJson) {
     return json{{"payload_hex", hex(bytes.data(), bytes.size())}}.dump();
 }
 
+// The claim with the player's own RLN identity: rln_module makes the identity (the secret never
+// leaves its keystore) and asks the gifter through the allocator client, which calls our
+// produce_auth for the payload. The membership then backs the player's Delivery node.
+static std::string claimWithRln(BubbleCorePrivate* d, const std::shared_ptr<Live>& g, const json& o,
+                                const GifterDefaults& gd, const std::string& me) {
+    const std::string network = o.value("network", gd.network);
+    const std::string configHex = b58ToHex32(o["config"].get<std::string>());
+    if (configHex.empty()) return json{{"ok", false}, {"error", "the registry is not a base58 account id"}}.dump();
+    const std::string registryId = "logos:" + network + ":" + configHex;
+    const std::string rlnId = o.value("rlnIdentifier", std::string(kDeliveryRlnIdentifier));
+    json opts = json::array();
+    auto kv = [&](const std::string& k, const std::string& v) { opts.push_back({{"key", k}, {"value", v}}); };
+    kv("delegated", "true");
+    kv("rate_limit", std::to_string(o.value("rate", 100)));
+    kv("auth_type", kAuthType);
+    kv("auth_provider", me);
+    kv("auth_args", json{{"gameId", g->id}, {"audience", o.value("audience", std::string())}}.dump());
+    if (o.contains("allocatorPeerId")) {
+        kv("discover", "false");
+        kv("allocator_peer_id", o["allocatorPeerId"].get<std::string>());
+        kv("allocator_multiaddr", o.value("allocatorMultiaddr", std::string()));
+    }
+    {
+        std::lock_guard<std::mutex> l(g->m);
+        g->claimResult = json{{"demoIdentity", false}, {"registryId", registryId}};
+    }
+    if (!d->rln) d->rln = std::make_unique<logos::LpClient>("rln_module", me);
+    if (!d->libp2p) d->libp2p = std::make_unique<logos::LpClient>("libp2p_module", me);
+    std::weak_ptr<Live> weak = g;
+    logos::LpClient* rln = d->rln.get();
+    logos::LpClient* p2p = d->libp2p.get();
+    d->claimThreads.erase(std::remove_if(d->claimThreads.begin(), d->claimThreads.end(), [](std::thread& t) {
+        return !t.joinable(); }), d->claimThreads.end());
+    d->claimThreads.emplace_back([weak, rln, p2p, registryId, rlnId, opts] {
+        auto finish = [&](const std::string& state, json result, const std::string& message) {
+            if (auto g = weak.lock()) {
+                std::lock_guard<std::mutex> l(g->m);
+                result["demoIdentity"] = false;
+                result["registryId"] = registryId;
+                if (!message.empty()) result["message"] = message;
+                g->claimState = state;
+                g->claimResult = result;
+            }
+        };
+        logos::CallError err;
+        p2p->invoke("start", json::array(), &err, 20000);
+        // A fresh keystore unlocks itself (rln_module's auto-unlock); a user-password one must be unlocked by its owner.
+        json u = parseReply(rln->invoke("unlock_keystore_auto", json::array(), &err, 30000));
+        json r = parseReply(rln->invoke("register_membership", json::array({registryId, rlnId, opts.dump()}), &err, 60000));
+        if (!r.is_object() || r.contains("error")) {
+            std::string why = r.is_object() && r["error"].is_object() ? r["error"].value("message", r["error"].dump())
+                            : r.is_object() ? r["error"].dump() : (err.message.empty() ? "no reply from rln_module" : err.message);
+            if (u.is_object() && u.contains("error")) why += " (keystore: " + u["error"].dump() + ")";
+            finish("failed", r.is_object() ? r : json::object(), "rln_module could not start the registration: " + why);
+            return;
+        }
+        // Poll the membership until the gifter's registration shows on chain (or fails).
+        for (int i = 0; i < 120; i++) {
+            if (weak.expired()) return;
+            json st = parseReply(rln->invoke("get_membership_state", json::array({registryId, rlnId}), &err, 20000));
+            const std::string state = st.is_object() ? st.value("state", std::string()) : "";
+            if (state == "active") { finish("granted", st, ""); return; }
+            if (state == "failed") {
+                const std::string why = st.value("failed_reason", std::string("the registration failed"));
+                const bool used = why.find("credential already used") != std::string::npos || why.find("credential_used") != std::string::npos;
+                finish(used ? "refused" : "failed", st, used ? "This game has already been claimed. Play another one to claim again." : why);
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+        }
+        finish("failed", json::object(), "the membership did not become active within 6 minutes");
+    });
+    return json{{"ok", true}, {"state", "asking"}}.dump();
+}
+
 std::string BubbleCoreImpl::claim(const std::string& gameId, const std::string& optionsJson) {
     auto g = d->live;
     if (!g || g->id != gameId) return json{{"ok", false}, {"error", "no such game"}}.dump();
@@ -437,6 +545,18 @@ std::string BubbleCoreImpl::claim(const std::string& gameId, const std::string& 
     if (!o.contains("allocatorPeerId") && !gd.peer.empty()) { o["allocatorPeerId"] = gd.peer; o["allocatorMultiaddr"] = gd.addr; }
     if (!o.contains("config") || !o["config"].is_string() || o["config"].get<std::string>().empty())
         return json{{"ok", false}, {"error", "no gifter is configured (set BUBBLE_REGISTRY and BUBBLE_GIFTER_PEER/ADDR)"}}.dump();
+    {
+        std::lock_guard<std::mutex> l(g->m);
+        if (!g->claimable) return json{{"ok", false}, {"error", g->beaconWhy.empty() ? "a practice game can't be claimed" : g->beaconWhy}}.dump();
+        if (!g->game->won || g->checkState != "done" || !g->checkResult.value("ok", false))
+            return json{{"ok", false}, {"error", "the game is not won and checked yet"}}.dump();
+        if (g->claimState == "asking" || g->claimState == "granted") return json{{"ok", true}, {"state", g->claimState}}.dump();
+        g->claimState = "asking";
+        g->claimResult = json();
+    }
+    const std::string me = moduleName().empty() ? std::string("bubble_core") : moduleName();
+    if (o.value("identity", gd.identity) == "rln") return claimWithRln(d, g, o, gd, me);
+
     // Without an identity of the player's own, a demo one: a random commitment, so the
     // membership is real on the registry but has no secret behind it to send with.
     bool demoIdentity = false;
@@ -447,15 +567,6 @@ std::string BubbleCoreImpl::claim(const std::string& gameId, const std::string& 
         o["identityCommitment"] = hex(idc, 32);
         demoIdentity = true;
     }
-    {
-        std::lock_guard<std::mutex> l(g->m);
-        if (!g->claimable) return json{{"ok", false}, {"error", g->beaconWhy.empty() ? "a practice game can't be claimed" : g->beaconWhy}}.dump();
-        if (!g->game->won || g->checkState != "done" || !g->checkResult.value("ok", false))
-            return json{{"ok", false}, {"error", "the game is not won and checked yet"}}.dump();
-        if (g->claimState == "asking" || g->claimState == "granted") return json{{"ok", true}, {"state", g->claimState}}.dump();
-        g->claimState = "asking";
-        g->claimResult = json();
-    }
     // The allocator client asks the gifter over libp2p; it calls back our produce_auth for the
     // payload, and answers once the membership is on chain (up to ~190 s).
     json args = {{"config", o["config"]}, {"identityCommitment", o["identityCommitment"]}, {"rate", o.value("rate", 100)},
@@ -463,7 +574,6 @@ std::string BubbleCoreImpl::claim(const std::string& gameId, const std::string& 
                  {"authArgs", {{"gameId", gameId}, {"audience", o.value("audience", std::string())}}},
                  {"discover", o.value("discover", !o.contains("allocatorPeerId"))}};
     if (o.contains("allocatorPeerId")) { args["allocatorPeerId"] = o["allocatorPeerId"]; args["allocatorMultiaddr"] = o.value("allocatorMultiaddr", std::string()); }
-    const std::string me = moduleName().empty() ? std::string("bubble_core") : moduleName();
     if (!d->allocator) d->allocator = std::make_unique<logos::LpClient>("membership_allocation_client_module", me);
     if (!d->libp2p) d->libp2p = std::make_unique<logos::LpClient>("libp2p_module", me);
     std::weak_ptr<Live> weak = g;
@@ -505,3 +615,4 @@ std::string BubbleCoreImpl::claimStatus(const std::string& gameId) {
     std::lock_guard<std::mutex> l(g->m);
     return json{{"ok", true}, {"state", g->claimState}, {"result", g->claimResult}}.dump();
 }
+

@@ -111,6 +111,16 @@ the testnet registry). The same game claimed again for another identity: refused
 `credential already used`. Gotcha: the wallet the gifter's `rln_lez_module` adopts must carry
 `gas_limit: 10000000` (a registration needs ~9.1M cycles; without it: `would_revert`).
 
+**The player's own identity (2026-11-22, same rig + the player's `rln_module` 0.16.2 and
+`rln_lez_module` 6.1.1 on the devnet):** `bubble_core.claim` with `identity: rln` →
+`rln_module.register_membership(logos:local:<config>, Delivery's rln identifier, delegated via the
+game's gifter, auth_provider bubble_core)` → the secret is made and kept in the player's keystore
+→ the gifter verifies the game and registers → `get_membership_state` **active**, and the
+player's `rln_module` **generates an RLN proof** with it: the membership is the one a Delivery
+node sends with. (The devnet sequencer must run optimized: the debug build at 1 s blocks answers
+RPC in ~15 s and the wallets time out; `scripts/local-registry.sh` now builds it at opt-level 3
+with 2 s blocks.)
+
 ## For Wednesday: two ways to demo
 
 **A. Local chain (no funds, fully ours).** The LEZ sequencer + RLN registry run on Atlas; the
