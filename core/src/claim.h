@@ -17,7 +17,7 @@
 // claim, so a claim can't be re-aimed at another membership and a game's proofs can't be
 // claimed by anyone who doesn't hold the key.
 //
-// The payload (binary, ~570 bytes for 38 chunks):
+// The payload (binary, ~810 bytes for 58 chunks):
 //   "BBL1" | u64le beacon id | pubkey(32) | u32le end tick | u8 n |
 //   n x (u32le tick | u32le state | u32le nonce) | sig(64)
 // sig = Ed25519 over the auth-vector binding digest (docs/auth-vectors.md 4.1):

@@ -116,7 +116,7 @@ int main(int argc, char** argv) {
     { auto t = bytes; t.resize(100); refused(verifyClaim(req(t, action), lookup, now), "truncated", "not a bubble claim"); }
     { json r = req(bytes, action); r["auth_type"] = "peer-any"; refused(verifyClaim(r, lookup, now), "other auth type", "unknown auth_type"); }
     { json r = req(bytes, action); r["config"]["audience"] = "gifter-2"; refused(verifyClaim(r, lookup, now), "other audience", "signature"); }
-    { json r = req(bytes, action); r["config"]["goal"] = 300; refused(verifyClaim(r, lookup, now), "other goal", "proofs"); }
+    { json r = req(bytes, action); r["config"]["goal"] = 200; refused(verifyClaim(r, lookup, now), "other goal", "proofs"); }
     { json r = req(bytes, action); refused(verifyClaim(r, [](uint64_t, Beacon&, std::string& w, bool& u) { w = "timeout"; u = true; return false; }, now), "node down", "unreachable"); }
 
     // Junk costs little: a claim with no work in it fails at its first proof.

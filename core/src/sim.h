@@ -22,7 +22,7 @@ constexpr int kBots = 24;
 constexpr int kTickHz = 30;
 
 struct Params {
-    int64_t start = 10, goal = 200, chunk = 5, minTicks = 1800, maxTicks = 36000;
+    int64_t start = 10, goal = 300, chunk = 5, minTicks = 1800, maxTicks = 36000;
     int64_t chunksNeeded() const { return (goal - start + chunk - 1) / chunk; }
     nlohmann::json toJson() const;
     static bool fromJson(const nlohmann::json& j, Params& out);

@@ -125,6 +125,16 @@ Item {
             root.inFlight = false
             var f = root.parse(raw)
             if (!f || !f.ok) return
+            // The camera glides from the last frame's to this one's over the measured gap
+            // between frames (drawing only: every position still comes from the core).
+            var now = Date.now()
+            if (root.fr && root.fr.world && f.world && Math.abs(f.world[0] - root.fr.world[0]) + Math.abs(f.world[1] - root.fr.world[1]) < board.width / 3)
+                root._prevWorld = [root.fr.world[0], root.fr.world[1]]
+            else root._prevWorld = null
+            if (root._arriveMs > 0) root._gapMs = Math.max(16, Math.min(200, 0.8 * root._gapMs + 0.2 * (now - root._arriveMs)))
+            root._arriveMs = now
+            root._frames++
+            if (now - root._fpsSince >= 1000) { root.fps = Math.round(root._frames * 1000 / (now - root._fpsSince)); root._frames = 0; root._fpsSince = now }
             root.fr = f
             board.requestPaint()
             if (f.over && root.screen === "play") {
@@ -139,6 +149,14 @@ Item {
     }
 
     Timer { interval: 33; repeat: true; running: root.playing && root.activeNow; onTriggered: root.pump() }
+    // Redraws between frames so the camera glide is smooth; only while a game is on.
+    Timer { interval: 16; repeat: true; running: root.playing && root.activeNow && root.fr !== null; onTriggered: board.requestPaint() }
+    property var _prevWorld: null
+    property real _arriveMs: 0
+    property real _gapMs: 33
+    property int _frames: 0
+    property real _fpsSince: 0
+    property int fps: 0             // frames from the core per second, as this view gets them
 
     Keys.onPressed: function (e) {
         if (e.key === Qt.Key_Escape) { root.giveUp(); return }
@@ -167,6 +185,11 @@ Item {
             var ctx = getContext("2d"), f = root.fr
             ctx.fillStyle = root.cBg; ctx.fillRect(0, 0, width, height)
             if (!f) return
+            ctx.save()
+            if (root._prevWorld) {
+                var t = Math.min(1, (Date.now() - root._arriveMs) / root._gapMs)
+                ctx.translate((1 - t) * (root._prevWorld[0] - f.world[0]), (1 - t) * (root._prevWorld[1] - f.world[1]))
+            }
             // Grid and the world's edge: world = [x, y, size, grid step] in view px.
             var wx = f.world[0], wy = f.world[1], ws = f.world[2], step = f.world[3]
             ctx.strokeStyle = root.cLine; ctx.lineWidth = 1; ctx.beginPath()
@@ -192,6 +215,7 @@ Item {
                 ctx.globalAlpha = 1
                 if (b[4]) { ctx.strokeStyle = root.cBad; ctx.lineWidth = 3; ctx.stroke() }
             }
+            ctx.restore()
             // The player in the middle: the body, the stomach as a lighter core, the shield as a ring.
             var me = f.me, cx = width / 2, cy = height / 2
             ctx.fillStyle = root.cAccent
@@ -239,7 +263,8 @@ Item {
                 Rectangle { height: parent.height; radius: 3; color: root.cOk; width: hud.proofs ? parent.width * Math.min(1, hud.proofs.found / hud.proofs.need) : 0 } }
             Text { color: root.cFaint; font.pixelSize: 12
                 text: root.fr ? ((root.fr.me.shield && root.fr.me.deaths > 0 ? "Eaten! Your digested size is safe.  ·  " : "")
-                    + Math.floor(root.fr.seconds / 60) + ":" + ("0" + Math.floor(root.fr.seconds) % 60).slice(-2)) : "" }
+                    + Math.floor(root.fr.seconds / 60) + ":" + ("0" + Math.floor(root.fr.seconds) % 60).slice(-2)
+                    + (root.fps > 0 ? "  ·  " + root.fps + " frames/s" : "")) : "" }
         }
     }
     Text {
