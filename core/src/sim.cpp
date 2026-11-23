@@ -25,12 +25,17 @@ int64_t speed(int64_t mass) {
     return v < 6 ? 6 : v;
 }
 
-void move(int64_t& x, int64_t& y, int dir, int64_t mass, bool boost) {
+void moveAt(int64_t& x, int64_t& y, int dir, int64_t s) {
     if (dir == kStop) return;
-    int64_t s = boost ? speed(mass) * 115 / 100 : speed(mass);
     x = clampW(x + COS[dir] * s / 1024);
     y = clampW(y + SIN[dir] * s / 1024);
 }
+
+void move(int64_t& x, int64_t& y, int dir, int64_t mass, bool boost) {
+    moveAt(x, y, dir, boost ? speed(mass) * 115 / 100 : speed(mass));
+}
+
+
 
 // a eats b when a is 10% bigger and b's centre is inside a.
 bool eats(int64_t ax, int64_t ay, int64_t am, int64_t ra, int64_t bx, int64_t by, int64_t bm) {
@@ -56,6 +61,8 @@ int64_t isqrt(int64_t n) {
 }
 
 int64_t radius(int64_t mass) { return isqrt(mass * 4096); }
+
+int64_t dotQuarters(int64_t mass) { return mass < kDotFull ? 4 : mass < kDotHalf ? 2 : mass < kDotQuarter ? 1 : 0; }
 
 int dirOf(int64_t dx, int64_t dy) {
     int best = 0;
@@ -101,6 +108,7 @@ Game::Game(const std::string& seedHex, const Params& params) : p(params) {
     for (int j = 0; j < kBots; j++) {
         int64_t m = j < 10 ? 4 + rng.below(8) : (j < 20 ? 12 + rng.below(48) : 60 + rng.below(100));
         bots.push_back(spawnBot(m));
+        if (j >= kBots - kHunters) bots.back().hunter = true;
     }
 }
 
@@ -108,6 +116,16 @@ Pellet Game::spawnPellet() {
     int64_t x = rng.below(kWorld);
     int64_t y = rng.below(kWorld);
     return {x, y};
+}
+
+// An eaten bubble comes back far from the player, smaller than half its size; a hunter comes back a hunter, half
+// again the player's size, so there is always something to run from.
+void Game::respawnBot(size_t i) {
+    const bool hunter = bots[i].hunter;
+    int64_t m = 4 + rng.below(std::max<int64_t>(40, mass() / 2));   // prey grows with the player
+    if (hunter) m = mass() * 3 / 2 + 20 + rng.below(40);
+    bots[i] = spawnBot(m);
+    bots[i].hunter = hunter;
 }
 
 Bot Game::spawnBot(int64_t mass) {
@@ -141,6 +159,18 @@ void Game::markPellets(int64_t x, int64_t y, int64_t r, int who) {
 }
 
 void Game::botThink(Bot& b, size_t idx) {
+    if (b.hunter) {
+        const int64_t mm = mass(), dx = me.x - b.x, dy = me.y - b.y;
+        const bool canEat = b.mass * 10 >= mm * 11 && me.shield == 0 && mm >= kDotFull;   // small ones are left to graze
+        if (b.hunt < 0) b.hunt++;
+        else if (b.hunt > 0) {
+            if (!canEat) b.hunt = -kRestTicks;
+            else if (--b.hunt == 0) b.hunt = -kRestTicks;
+            else { if (b.hunt % 3 == 0) b.dir = dirOf(dx, dy); return; }
+        } else if (canEat && std::llabs(dx) < kHuntSight && std::llabs(dy) < kHuntSight) {
+            b.hunt = kHuntTicks; b.dir = dirOf(dx, dy); return;
+        }
+    }
     if (b.wait > 0) { b.wait--; return; }
     b.wait = kRetarget;
     int64_t mm = mass();
@@ -178,7 +208,13 @@ std::string Game::step(int input, const std::vector<int64_t>& digests) {
         me.stomach -= p.chunk; me.body += p.chunk; chunks++;
     }
     move(me.x, me.y, me.dir, mass(), true);   // the player is 15% quicker than a bot its size
-    for (size_t i = 0; i < bots.size(); i++) { botThink(bots[i], i); move(bots[i].x, bots[i].y, bots[i].dir, bots[i].mass, false); }
+    const int64_t huntSpeed = speed(mass()) * 115 / 100 * kHuntSpeed / 100;
+    for (size_t i = 0; i < bots.size(); i++) {
+        Bot& b = bots[i];
+        botThink(b, i);
+        if (b.hunt > 0) moveAt(b.x, b.y, b.dir, std::max(huntSpeed, speed(b.mass)));
+        else move(b.x, b.y, b.dir, b.mass, false);
+    }
 
     // Pellets: each goes to the first mover (the player, then the bots in order) whose circle
     // holds it at the start of the pass; then they respawn in pellet order.
@@ -188,7 +224,7 @@ std::string Game::step(int input, const std::vector<int64_t>& digests) {
         int who = eatenBy_[j];
         if (who == -1) continue;
         eatenBy_[j] = -1;
-        if (who == 0) me.stomach += 1; else bots[who - 1].mass += 1;
+        if (who == 0) { me.crumbs += dotQuarters(mass()); me.stomach += me.crumbs / 4; me.crumbs %= 4; } else bots[who - 1].mass += 1;
         gridRemove(j); pellets[j] = spawnPellet(); gridAdd(j);
     }
     // Bubbles.
@@ -196,8 +232,7 @@ std::string Game::step(int input, const std::vector<int64_t>& digests) {
         int64_t mm = mass();
         if (eats(me.x, me.y, mm, radius(mm), bots[a].x, bots[a].y, bots[a].mass)) {
             me.stomach += bots[a].mass;
-            int64_t m = 4 + rng.below(40);
-            bots[a] = spawnBot(m);
+            respawnBot(a);
             continue;
         }
         Bot& ba = bots[a];
@@ -205,7 +240,7 @@ std::string Game::step(int input, const std::vector<int64_t>& digests) {
         if (me.shield == 0 && eats(ba.x, ba.y, ba.mass, ra, me.x, me.y, mass())) {
             // Eaten: the bot gets what was still undigested; the digested body is safe.
             ba.mass += me.stomach; ra = radius(ba.mass);
-            me.stomach = 0; deaths++; me.shield = kShield;
+            me.stomach = 0; me.crumbs = 0; deaths++; me.shield = kShield;
             queue.clear();   // the proofs being searched for are lost with the food
             me.x = rng.below(kWorld); me.y = rng.below(kWorld);
         }
@@ -213,14 +248,15 @@ std::string Game::step(int input, const std::vector<int64_t>& digests) {
             if (c == a) continue;
             if (eats(bots[a].x, bots[a].y, bots[a].mass, ra, bots[c].x, bots[c].y, bots[c].mass)) {
                 bots[a].mass += bots[c].mass; ra = radius(bots[a].mass);
-                int64_t m = 4 + rng.below(40);
-                bots[c] = spawnBot(m);
+                respawnBot(c);
             }
         }
         // Huge bots slowly shrink, so the world never locks up.
         if (bots[a].mass > 600 && (tick + (int64_t)a) % 30 == 0) bots[a].mass -= 1;
     }
     if (me.shield > 0) me.shield--;
+    // Hunger: what isn't a whole chunk yet slowly goes.
+    if (tick % kHungerTicks == kHungerTicks - 1 && me.stomach > p.chunk * (int64_t)queue.size()) me.stomach--;
     tick++;
     // Whole chunks in the stomach join the digestion queue, each bound to this tick and state.
     if (me.stomach >= p.chunk * (int64_t)(queue.size() + 1) && chunks + (int64_t)queue.size() < p.chunksNeeded()) {
@@ -242,9 +278,9 @@ std::string Game::stateHash() const {
 uint32_t Game::stateHash32() const {
     uint32_t h = 0x811c9dc5u;
     auto mix = [&](int64_t v) { h = (h ^ (uint32_t)v) * 16777619u; };
-    mix(tick); mix(deaths); mix(me.shield); mix(me.x); mix(me.y); mix(me.body); mix(me.stomach); mix(chunks);
+    mix(tick); mix(deaths); mix(me.shield); mix(me.x); mix(me.y); mix(me.body); mix(me.stomach); mix(chunks); mix(me.crumbs);
     for (int i = 0; i < 4; i++) mix(rng.s[i]);
-    for (const auto& b : bots) { mix(b.x); mix(b.y); mix(b.mass); mix(b.dir); }
+    for (const auto& b : bots) { mix(b.x); mix(b.y); mix(b.mass); mix(b.dir); mix(b.hunt); }
     for (const auto& pl : pellets) { mix(pl.x); mix(pl.y); }
     return h;
 }
@@ -263,7 +299,7 @@ json Record::toJson(const std::string& seedHex) const {
 
 bool Record::fromJson(const json& j, Record& o, std::string& why) {
     why = "bad record";
-    if (!j.is_object() || !j.contains("v") || j["v"] != kSimVersion) { why = "unknown record version"; return false; }
+    if (!j.is_object() || !j.contains("v") || j["v"] != kSimVersion) { why = "this game was played with other rules (record version " + (j.is_object() && j.contains("v") ? j["v"].dump() : std::string("?")) + ", this core plays " + std::to_string(kSimVersion) + "); update Bubble"; return false; }
     if (!j.contains("end") || !j["end"].is_number_integer()) return false;
     o.end = j["end"].get<int64_t>();
     const json& in = j.value("inputs", json::array());

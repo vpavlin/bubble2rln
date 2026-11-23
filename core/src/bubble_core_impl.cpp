@@ -355,7 +355,7 @@ std::string BubbleCoreImpl::frame(const std::string& gameId, int64_t dx, int64_t
         const Bot& b = gm.bots[j];
         const double r = radius(b.mass) * s, x = cx + b.x * s, y = cy + b.y * s;
         if (x < -r || y < -r || x > w + r || y > h + r) continue;
-        bots.push_back({std::lround(x), std::lround(y), std::lround(std::max(1.0, r)), (int)j, b.mass * 10 >= mm * 11 ? 1 : 0});
+        bots.push_back({std::lround(x), std::lround(y), std::lround(std::max(1.0, r)), (int)j, b.hunt > 0 ? 2 : (b.mass * 10 >= mm * 11 ? 1 : 0)});   // 2: hunting you
     }
     for (size_t j = 0; j < gm.pellets.size(); j++) {
         const double x = cx + gm.pellets[j].x * s, y = cy + gm.pellets[j].y * s;
@@ -375,7 +375,7 @@ std::string BubbleCoreImpl::frame(const std::string& gameId, int64_t dx, int64_t
     json me = {{"r", std::lround(rMe)}, {"body", gm.me.body}, {"stomach", gm.me.stomach},
                {"stomachR", std::lround(mm ? rMe * std::sqrt((double)gm.me.stomach / (double)mm) : 0)},
                {"shield", gm.me.shield > 0}, {"deaths", gm.deaths}, {"start", g->params.start}, {"goal", g->params.goal},
-               {"digesting", waiting}};
+               {"digesting", waiting}, {"dotFeeds", dotQuarters(mm) * 25}};   // % of a dot that still feeds you
     return json{{"ok", true}, {"tick", gm.tick}, {"seconds", gm.tick / kTickHz}, {"over", gm.over}, {"won", gm.won},
                 {"why", gm.why}, {"me", me}, {"scale", scale},
                 {"world", {std::lround(cx), std::lround(cy), std::lround(kWorld * s), std::lround(100 * kU * s)}},

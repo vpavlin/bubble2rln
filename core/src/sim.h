@@ -12,7 +12,7 @@
 
 namespace bubble {
 
-constexpr int kSimVersion = 2;
+constexpr int kSimVersion = 3;   // 3: dots feed less as you grow, hunters, hunger
 constexpr int kDirs = 64;
 constexpr int kStop = 64;              // input: stand still
 constexpr int64_t kU = 16;             // units per px
@@ -20,6 +20,16 @@ constexpr int64_t kWorld = 2400 * kU;  // square world side
 constexpr int kPellets = 320;
 constexpr int kBots = 24;
 constexpr int kTickHz = 30;
+constexpr int kHunters = 3;            // the last kHunters bots hunt the player
+
+// Dots feed in quarters: fully while small, less and less as you grow, then not at all,
+// so the second half of the way to the goal has to be eaten off other bubbles.
+constexpr int64_t kDotFull = 100, kDotHalf = 150, kDotQuarter = 200;
+// Hunger: every kHungerTicks the stomach loses 1 of what is not yet a whole chunk.
+constexpr int64_t kHungerTicks = 30;
+// A hunter that sees the player (once it is past kDotFull, and could eat it) follows it for kHuntTicks, then rests for
+// kRestTicks; while hunting it moves at kHuntSpeed % of the player's speed.
+constexpr int64_t kHuntSight = 700 * kU, kHuntTicks = 240, kRestTicks = 180, kHuntSpeed = 88;
 
 struct Params {
     int64_t start = 10, goal = 300, chunk = 5, minTicks = 1800, maxTicks = 36000;
@@ -28,8 +38,12 @@ struct Params {
     static bool fromJson(const nlohmann::json& j, Params& out);
 };
 
-struct Me { int64_t x, y, body, stomach; int dir; int64_t shield; };
-struct Bot { int64_t x, y, mass; int dir; int64_t wait; };
+struct Me { int64_t x, y, body, stomach; int dir; int64_t shield; int64_t crumbs = 0; };
+struct Bot {
+    int64_t x, y, mass; int dir; int64_t wait;
+    bool hunter = false;
+    int64_t hunt = 0;   // > 0: ticks left following the player; < 0: ticks left resting
+};
 struct Pellet { int64_t x, y; };
 
 struct Rng {
@@ -71,6 +85,7 @@ private:
     std::vector<int> eatenBy_;
     Pellet spawnPellet();
     Bot spawnBot(int64_t mass);
+    void respawnBot(size_t i);
     void gridAdd(int j);
     void gridRemove(int j);
     void markPellets(int64_t x, int64_t y, int64_t r, int who);
@@ -79,6 +94,7 @@ private:
 
 int64_t isqrt(int64_t n);
 int64_t radius(int64_t mass);
+int64_t dotQuarters(int64_t mass);   // dot food in quarters at this size
 int dirOf(int64_t dx, int64_t dy);
 
 // The record of a game: the heading changes and the digestions, tick by tick.

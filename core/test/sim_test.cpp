@@ -1,5 +1,5 @@
-// The rules' tests: (1) replay the reference records (made by the first, JavaScript version of the
-// rules; vectors.json) to the same state hashes; (2) a greedy bot plays games, and each record
+// The rules' tests: (1) replay the reference records (vectors.json: made by `sim_test
+// vectors.json 0 regen` when the rules last changed, kSimVersion 3) to the same state hashes; (2) a greedy bot plays games, and each record
 // replays to the live game's hash; (3) tampering is refused; (4) the proof of work round-trips.
 // usage: sim_test vectors.json [games]
 #include "sim.h"
@@ -49,8 +49,77 @@ static int decide(const Game& g) {
     return any ? dirOf(bx - g.me.x, by - g.me.y) : kStop;
 }
 
+// The lazy way: cross the map corner to corner and back, eating whatever lies on the line.
+static int sweep(const Game& g) {
+    static int64_t tx = 0, ty = 0;
+    if (g.tick == 0) { tx = 0; ty = 0; }
+    if (std::llabs(g.me.x - tx) < 200 * kU && std::llabs(g.me.y - ty) < 200 * kU) {
+        if (tx == 0 && ty == 0) { tx = kWorld; ty = kWorld; } else if (tx == kWorld && ty == kWorld) { tx = kWorld; ty = 0; }
+        else if (tx == kWorld && ty == 0) { tx = 0; ty = kWorld; } else { tx = 0; ty = 0; }
+    }
+    return dirOf(tx - g.me.x, ty - g.me.y);
+}
+
+static void playMany(const char* name, int (*pick)(const Game&), int games) {
+    Params p;
+    int wins = 0, eaten = 0; int64_t ticks = 0, best = 0;
+    for (int i = 0; i < games; i++) {
+        unsigned char s[32]; char hex[65];
+        crypto_hash_sha256(s, (const unsigned char*)&i, sizeof i);
+        sodium_bin2hex(hex, sizeof hex, s, 32);
+        Game g(hex, p);
+        while (!g.over) {
+            int d = pick(g);
+            std::vector<int64_t> ds;
+            while (g.me.stomach >= p.chunk * (int64_t)(ds.size() + 1) && g.chunks + (int64_t)ds.size() < p.chunksNeeded()) ds.push_back(g.chunks + (int64_t)ds.size());
+            int64_t before = g.deaths, mmb = g.mass();
+            std::vector<Bot> bb = g.bots;
+            g.step(d, ds);
+            if (g.deaths > before && getenv("WHO")) {
+                // the bot that grew by the most ate us
+                size_t k = 0; int64_t gr = -1;
+                for (size_t q = 0; q < bb.size(); q++) if (g.bots[q].mass - bb[q].mass > gr) { gr = g.bots[q].mass - bb[q].mass; k = q; }
+                printf("eaten t=%lld mass=%lld by bot %zu hunter=%d hunt=%lld mass=%lld\n", (long long)g.tick, (long long)mmb, k, (int)bb[k].hunter, (long long)bb[k].hunt, (long long)bb[k].mass);
+            }
+        }
+        if (g.won) { wins++; ticks += g.tick; }
+        eaten += (int)g.deaths; best = std::max(best, g.me.body);
+    }
+    printf("%s: %d/%d won, mean %.0f s, eaten %.1f per game, best size %lld\n", name, wins, games, wins ? ticks / 30.0 / wins : 0.0, (double)eaten / games, (long long)best);
+}
+
+// Writes new reference records (the rules' regression vectors): the greedy bot on fixed seeds.
+static int regen(const char* path) {
+    json out = json::array();
+    for (int i = 0; out.size() < 6; i++) {
+        unsigned char s[32]; char hex[65];
+        crypto_hash_sha256(s, (const unsigned char*)&i, sizeof i);
+        sodium_bin2hex(hex, sizeof hex, s, 32);
+        Params p; p.goal = i % 2 ? 200 : 300;
+        Game g(hex, p); Record rec; std::string hash500;
+        const std::string hash0 = g.stateHash();
+        while (!g.over) {
+            int d = decide(g);
+            std::vector<std::pair<int64_t, uint32_t>> dig; std::vector<int64_t> ds;
+            while (g.me.stomach >= p.chunk * (int64_t)(dig.size() + 1) && g.chunks + (int64_t)dig.size() < p.chunksNeeded()) {
+                dig.push_back({g.chunks + (int64_t)dig.size(), 0}); ds.push_back(dig.back().first);
+            }
+            rec.add(g.tick, d, dig); g.step(d, ds);
+            if (g.tick == 500) hash500 = g.stateHash();
+        }
+        rec.end = g.tick;
+        if (!g.won) continue;   // a reference record replays to a won game
+        out.push_back({{"seed", hex}, {"params", p.toJson()}, {"rec", rec.toJson(hex)}, {"hash", g.stateHash()}, {"deaths", g.deaths},
+                       {"ticks", g.tick}, {"hash0", hash0}, {"hash500", hash500}});
+    }
+    std::ofstream(path) << out.dump() << "\n";
+    printf("wrote %s\n", path);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (sodium_init() < 0) return 1;
+    if (argc > 3 && std::string(argv[3]) == "regen") return regen(argv[1]);
     // (1) the reference records.
     std::ifstream f(argc > 1 ? argv[1] : "vectors.json");
     std::stringstream ss; ss << f.rdbuf();
@@ -60,9 +129,7 @@ int main(int argc, char** argv) {
         std::string seed = v["seed"];
         CHECK(Game(seed, p).stateHash() == v["hash0"], "initial hash %s", seed.substr(0, 8).c_str());
         Record rec; std::string why;
-        // The moves of v1 and v2 are the same; only the proof of work changed.
-        json rj = v["rec"]; rj["v"] = kSimVersion; rj["digests"] = json::array();
-        for (const auto& d : v["rec"]["digests"]) rj["digests"].push_back({d[0], d[1], 0});
+        json rj = v["rec"];   // nonces are 0: the proof of work is checked in (4), not here
         CHECK(Record::fromJson(rj, rec, why), "record: %s", why.c_str());
         json r = replay(seed, p, rec);
         CHECK(r.value("ok", false) && r["hash"] == v["hash"] && r["deaths"] == v["deaths"],
@@ -100,6 +167,9 @@ int main(int argc, char** argv) {
     }
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     printf("bot: %d/%d won, mean %.0f s of play, %.0f ms CPU per game (play + replay)\n", wins, games, wins ? ticks / 30.0 / wins : 0.0, ms / games);
+
+    playMany("sweeper", sweep, games);
+    playMany("greedy", decide, games);
 
     // (3) tampering, (4) proof of work, on a short game with real nonces at 4 bits.
     {

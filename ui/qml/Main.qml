@@ -226,7 +226,7 @@ Item {
             }
             // Bubbles move on their own: glide each from where the last frame had it.
             var pb = root._prevWorld ? root._prevBots : null
-            // Bubbles: [x, y, r, colour, dangerous]; the dangerous ones get a red ring.
+            // Bubbles: [x, y, r, colour, danger]; 1 = could eat you (red ring), 2 = hunting you (two rings).
             for (var j = 0; j < f.bots.length; j++) {
                 var b = f.bots[j]
                 ctx.globalAlpha = 0.85
@@ -236,6 +236,7 @@ Item {
                 ctx.beginPath(); ctx.arc(bx, by, b[2], 0, 2 * Math.PI); ctx.fill()
                 ctx.globalAlpha = 1
                 if (b[4]) { ctx.strokeStyle = root.cBad; ctx.lineWidth = 3; ctx.stroke() }
+                if (b[4] === 2) { ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(bx, by, b[2] + 8, 0, 2 * Math.PI); ctx.stroke() }
             }
             ctx.restore()
             // The player in the middle: the body, the stomach as a lighter core, the shield as a ring.
@@ -281,6 +282,9 @@ Item {
                     width: hud.me ? parent.width * Math.min(1, (hud.me.body - hud.me.start) / (hud.me.goal - hud.me.start)) : 0 } }
             Text { color: root.cSub; font.pixelSize: 13
                 text: hud.me ? ("In the stomach: " + hud.me.stomach + (hud.me.digesting ? "  (digesting…)" : "")) : "" }
+            Text { color: hud.me && hud.me.dotFeeds === 0 ? root.cAccent : root.cSub; font.pixelSize: 13
+                visible: hud.me && hud.me.dotFeeds !== undefined && hud.me.dotFeeds < 100
+                text: hud.me ? (hud.me.dotFeeds === 0 ? "Dots don't feed you any more: eat bubbles" : "Dots feed you " + hud.me.dotFeeds + " %") : "" }
             Text { color: root.cSub; font.pixelSize: 13
                 text: hud.proofs ? ("Digestion proofs: " + hud.proofs.found + " / " + hud.proofs.need + (hud.proofs.found < hud.proofs.need ? "  ·  " + Math.round(hud.proofs.hashRate) + " hashes/s" : "")) : "" }
             Rectangle { Layout.fillWidth: true; height: 6; radius: 3; color: root.cRaised
@@ -319,6 +323,8 @@ Item {
                     visible: root.screen === "start" || root.screen === "starting"
                     text: "Grow from a small bubble to the goal size. Eat the dots and anything at least 10% smaller than you; "
                         + "keep away from bubbles with a <font color='" + root.cBad + "'>red ring</font>. If one eats you, you lose only what you have not digested yet.<br><br>"
+                        + "Dots feed you less as you grow, and past size 200 not at all: the rest you hunt. Food you haven't swallowed whole slowly goes. "
+                        + "Once you are past 100, the big <font color='" + root.cBad + "'>double-ringed</font> hunters come after you.<br><br>"
                         + "What you eat goes to your stomach first. Your computer <b>digests</b> it by solving small proofs of work, so you grow only as fast as it can work. "
                         + "Reach the goal and the game, with its proofs, becomes your ticket for an <b>RLN membership</b>: your right to send messages on Logos Messaging."
                 }
