@@ -1,0 +1,14 @@
+[Unit]
+Description=Bubble gifter on the LEZ testnet: RLN membership allocator (liblogos_lez_rln_module 5.1.0) with bubble_core as the bubble-play verifier
+After=network-online.target bubble-chain.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/bin/bash -c ". /root/bubble-testnet/env.prod.sh && exec /root/scala-hub2/logosctl-app/squashfs-root/AppRun daemon start"
+ExecStartPost=/root/bubble-testnet/after-start.prod
+TimeoutStartSec=900
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
