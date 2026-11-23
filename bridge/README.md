@@ -1,37 +1,16 @@
-# logos-membership-allocation-client-module
+# rln_gifter_module (bridge)
 
-Logos module `membership_allocation_client_module`: the client of the RLN membership
-allocator. It asks an allocator, over libp2p, to register an RLN membership
-on the client's behalf, so the client holds no funds and its RLN identity secret never leaves its
-machine. The allocator side is
-[`logos-membership-allocation-module`](https://github.com/logos-co/logos-membership-allocation-module).
+Basecamp's Delivery (delivery_module 0.3.3) keeps its RLN identities in `liblogos_rln_module`
+0.12. Its delegated registration (`register_membership` with `delegated: true`) asks a gifter
+through a co-located module named `rln_gifter_module`, with `request({gifterPeerId,
+gifterMultiaddr, identityCommitment, rate, authType, authProvider, authArgs})`, and reads back
+`{leaf_index, tx_hash}` or `{error}`.
 
-## Methods
-
-- `request(args_json)`: request a membership for an identity commitment. Allocators
-  advertising the (registry, auth type) pair through libp2p service discovery are asked first,
-  then the configured `allocatorPeerId`/`allocatorMultiaddr` pair if any. The auth payload is given raw
-  (`authPayload`) or produced by an `authProvider` module that implements the `auth_vector`
-  producer contract; an auth type with neither needs no payload. This module knows no auth
-  vector by name. A failure carries a `kind` to branch on.
-- `discover(args_json)`: the allocators currently advertising a (registry, auth type) pair.
-
-The argument and reply shapes are documented on the trait in `rust-lib/src/lib.rs`.
-
-## Dependencies
-
-- `libp2p_module` (declared; loaded first by the host).
-- An auth producer module, when `authProvider` names one. It is opened on first use.
-- Shared crates, pinned by commit: `membership_allocation_action`, `paymaster_client`,
-  `paymaster_lp` and `paymaster_wire` from `logos-membership-allocation-crates`.
-
-## Build and test
-
-```sh
-nix build .#lgx-portable      # the release package
-nix run .#generate            # stage rust-lib/generated/ and logos-rust-sdk-src/ for cargo
-cd rust-lib && cargo test && cargo clippy --all-targets -- -D warnings
-```
-
-The tests enable the `test-fake` feature of `paymaster_lp` as a dev-dependency; the
-plugin build links the real `lp_*` bindings (`cargo check --lib` compiles that path).
+This module is `membership_allocation_client_module` (logos-co/logos-membership-allocation-client-module
+d8286f4) under that name. It maps gifterPeerId/gifterMultiaddr to allocatorPeerId/allocatorMultiaddr
+(discovery off), takes the registry from `authArgs.config`, and requests over the membership
+allocation protocol (/logos/paymaster/rln-membership/1.0.0) that the Bubble gifter serves. A reply
+of kind `unconfirmed` (sent, not on chain within the gifter's window) goes back as
+`{pending: true, tx_hash}`: 0.12 marks a record failed on any `error`, and a failed record can't be
+dropped. So a won game registers an identity that Delivery's own keystore made, and Delivery sends
+with it.
