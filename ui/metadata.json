@@ -10,7 +10,6 @@
   "dependencies": [
     "bubble_core",
     "membership_allocation_client_module",
-    "liblogos_rln_module",
     "rln_gifter_module"
   ],
   "nix": {
