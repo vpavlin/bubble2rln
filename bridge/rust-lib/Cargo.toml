@@ -1,0 +1,56 @@
+[package]
+name = "rln_gifter_module"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+resolver = "2"
+
+[lib]
+crate-type = ["staticlib"]
+
+[profile.release]
+panic = "abort"
+
+[dependencies]
+serde_json = "1"
+hex = "0.4"
+membership_allocation_action = { git = "https://github.com/logos-co/logos-membership-allocation-crates", rev = "a91fb8af6bcaf1030672a2476600fca95c97bb39" }
+paymaster_client = { git = "https://github.com/logos-co/logos-membership-allocation-crates", rev = "a91fb8af6bcaf1030672a2476600fca95c97bb39" }
+paymaster_lp = { git = "https://github.com/logos-co/logos-membership-allocation-crates", rev = "a91fb8af6bcaf1030672a2476600fca95c97bb39" }
+paymaster_wire = { git = "https://github.com/logos-co/logos-membership-allocation-crates", rev = "a91fb8af6bcaf1030672a2476600fca95c97bb39" }
+logos-rust-sdk = { path = "../logos-rust-sdk-src" }
+
+[dev-dependencies]
+auth_vector = { git = "https://github.com/logos-co/logos-membership-allocation-crates", rev = "a91fb8af6bcaf1030672a2476600fca95c97bb39" }
+paymaster_lp = { git = "https://github.com/logos-co/logos-membership-allocation-crates", rev = "a91fb8af6bcaf1030672a2476600fca95c97bb39", features = ["test-fake"] }
+
+[lints.rust]
+unused_lifetimes = "warn"
+
+[lints.clippy]
+needless_pass_by_value = "warn"
+large_types_passed_by_value = "warn"
+trivially_copy_pass_by_ref = "warn"
+ref_option = "warn"
+ptr_arg = "warn"
+borrowed_box = "warn"
+implicit_clone = "warn"
+unnecessary_to_owned = "warn"
+iter_overeager_cloned = "warn"
+cloned_instead_of_copied = "warn"
+assigning_clones = "warn"
+clone_on_ref_ptr = "warn"
+rc_buffer = "warn"
+rc_mutex = "warn"
+arc_with_non_send_sync = "warn"
+mutex_atomic = "warn"
+redundant_allocation = "warn"
+box_collection = "warn"
+unnecessary_box_returns = "warn"
+large_enum_variant = "warn"
+await_holding_lock = "warn"
+needless_lifetimes = "warn"
+extra_unused_lifetimes = "warn"
+undocumented_unsafe_blocks = "warn"
+allow_attributes_without_reason = "warn"

@@ -61,7 +61,7 @@ struct GifterDefaults {
     std::string peer = "16Uiu2HAkx4HRjCAN4HCWZyqXn7ZxnDGhxQhcpDuBhANBhx3VXP88";
     std::string addr = "/ip4/128.140.55.128/tcp/9101";
     std::string registry = "J3NXPWUspX2zqJU3tUbR6MHmm83aJc5AzvidEaBBKnat";   // the LEZ testnet registry Delivery trusts
-    std::string network = "testnet", identity = "demo";
+    std::string network = "testnet", identity = "rln";
 };
 GifterDefaults gifterDefaults() {
     GifterDefaults g;
@@ -490,6 +490,12 @@ std::string BubbleCoreImpl::produce_auth(const std::string& requestJson) {
     return json{{"payload_hex", hex(bytes.data(), bytes.size())}}.dump();
 }
 
+// The RLN module that holds Delivery's keystore: liblogos_rln_module (BUBBLE_RLN_MODULE overrides).
+static std::string rlnModuleName() {
+    const char* e = std::getenv("BUBBLE_RLN_MODULE");
+    return e && *e ? e : "liblogos_rln_module";
+}
+
 // The claim with the player's own RLN identity: rln_module makes the identity (the secret never
 // leaves its keystore) and asks the gifter through the allocator client, which calls our
 // produce_auth for the payload. The membership then backs the player's Delivery node.
@@ -500,30 +506,35 @@ static std::string claimWithRln(BubbleCorePrivate* d, const std::shared_ptr<Live
     if (configHex.empty()) return json{{"ok", false}, {"error", "the registry is not a base58 account id"}}.dump();
     const std::string registryId = "logos:" + network + ":" + configHex;
     const std::string rlnId = o.value("rlnIdentifier", std::string(kDeliveryRlnIdentifier));
+    // liblogos_rln_module 0.12 (what Delivery 0.3.3 uses) asks its gifter through a module named
+    // rln_gifter_module (Bubble ships a bridge by that name onto the membership allocation
+    // protocol); it needs the gifter's peer and address, and the auth vector to produce.
     json opts = json::array();
     auto kv = [&](const std::string& k, const std::string& v) { opts.push_back({{"key", k}, {"value", v}}); };
     kv("delegated", "true");
     kv("rate_limit", std::to_string(o.value("rate", 100)));
+    kv("gifter_peer_id", o.value("allocatorPeerId", gd.peer));
+    kv("gifter_multiaddr", o.value("allocatorMultiaddr", gd.addr));
     kv("auth_type", kAuthType);
     kv("auth_provider", me);
-    kv("auth_args", json{{"gameId", g->id}, {"audience", o.value("audience", std::string())}}.dump());
-    if (o.contains("allocatorPeerId")) {
-        kv("discover", "false");
-        kv("allocator_peer_id", o["allocatorPeerId"].get<std::string>());
-        kv("allocator_multiaddr", o.value("allocatorMultiaddr", std::string()));
-    }
+    kv("auth_args", json{{"gameId", g->id}, {"audience", o.value("audience", std::string())},
+                         {"config", o["config"]}}.dump());
     {
         std::lock_guard<std::mutex> l(g->m);
         g->claimResult = json{{"demoIdentity", false}, {"registryId", registryId}};
     }
-    if (!d->rln) d->rln = std::make_unique<logos::LpClient>("rln_module", me);
+    if (!d->rln) d->rln = std::make_unique<logos::LpClient>(rlnModuleName(), me);
     if (!d->libp2p) d->libp2p = std::make_unique<logos::LpClient>("libp2p_module", me);
     std::weak_ptr<Live> weak = g;
     logos::LpClient* rln = d->rln.get();
     logos::LpClient* p2p = d->libp2p.get();
     d->claimThreads.erase(std::remove_if(d->claimThreads.begin(), d->claimThreads.end(), [](std::thread& t) {
         return !t.joinable(); }), d->claimThreads.end());
-    d->claimThreads.emplace_back([weak, rln, p2p, registryId, rlnId, opts] {
+    const json reqConfig = o["config"];
+    const int64_t rate = o.value("rate", 100);
+    const std::string meName = me, gameIdC = g->id, audienceC = o.value("audience", std::string());
+    const std::string peerC = o.value("allocatorPeerId", gd.peer), addrC = o.value("allocatorMultiaddr", gd.addr);
+    d->claimThreads.emplace_back([weak, rln, p2p, registryId, rlnId, opts, reqConfig, rate, meName, gameIdC, audienceC, peerC, addrC] {
         auto finish = [&](const std::string& state, json result, const std::string& message) {
             if (auto g = weak.lock()) {
                 std::lock_guard<std::mutex> l(g->m);
@@ -536,31 +547,98 @@ static std::string claimWithRln(BubbleCorePrivate* d, const std::shared_ptr<Live
         };
         logos::CallError err;
         p2p->invoke("start", json::array(), &err, 20000);
+        // The registry is read through liblogos_lez_rln_module's wallet: a fresh one syncs the
+        // testnet first (~10 min on a first start), and until then every registry read stalls.
+        {
+            logos::LpClient lez("liblogos_lez_rln_module", "bubble_core");
+            logos::CallError werr;
+            json w = parseReply(lez.invoke("wallet_status", json::array(), &werr, 20000));
+            if (w.is_object() && w.contains("ready") && !w.value("ready", false)) {
+                finish("failed", json::object(), "Your Basecamp's RLN wallet is still syncing with the LEZ testnet (a first start takes about 10 minutes). Try again in a few minutes.");
+                return;
+            }
+        }
         // A fresh keystore unlocks itself (rln_module's auto-unlock); a user-password one must be unlocked by its owner.
         json u = parseReply(rln->invoke("unlock_keystore_auto", json::array(), &err, 30000));
-        json r = parseReply(rln->invoke("register_membership", json::array({registryId, rlnId, opts.dump()}), &err, 60000));
-        if (!r.is_object() || r.contains("error")) {
-            std::string why = r.is_object() && r["error"].is_object() ? r["error"].value("message", r["error"].dump())
-                            : r.is_object() ? r["error"].dump() : (err.message.empty() ? "no reply from rln_module" : err.message);
-            if (u.is_object() && u.contains("error")) why += " (keystore: " + u["error"].dump() + ")";
-            finish("failed", r.is_object() ? r : json::object(), "rln_module could not start the registration: " + why);
+
+        // At most ONE record per registry in Delivery's keystore: liblogos_rln_module 0.12 counts a
+        // failed record as a candidate for the scope, so a second record makes every
+        // get_membership_state "ambiguous" and Delivery stops sending. So: a usable record is
+        // done, a pending one is waited for, a failed one is re-registered with its own
+        // commitment (its next state read then heals it to active), and only no record at all
+        // makes a new identity.
+        json mine = json::array();
+        {
+            json all = parseReply(rln->invoke("get_memberships", json::array({registryId}), &err, 30000));
+            if (all.is_object() && all["memberships"].is_array()) mine = all["memberships"];
+        }
+        auto stateOf = [](const json& m) { return m.value("state", std::string()); };
+        bool wait = false;
+        for (const auto& m : mine) {
+            const std::string st = stateOf(m);
+            if (st == "active" || st == "grace_period") {
+                finish("granted", m, "Your Basecamp already has an RLN membership; this game wasn't needed for it.");
+                return;
+            }
+            if (st == "pending") wait = true;
+        }
+        if (!wait && mine.size() > 1) {
+            finish("failed", json{{"memberships", mine}}, "Your Basecamp's RLN keystore holds several failed memberships for this registry, which liblogos_rln_module 0.12 can't choose between. It needs a fresh keystore.");
             return;
         }
+        if (!wait && mine.size() == 1) {
+            // Re-register the one failed record's commitment directly through the gifter.
+            const std::string idc = mine[0]["credential"].value("identity_commitment", std::string());
+            json args = {{"config", reqConfig}, {"identityCommitment", idc}, {"rate", rate},
+                         {"authType", kAuthType}, {"authProvider", meName},
+                         {"authArgs", json{{"gameId", gameIdC}, {"audience", audienceC}}.dump()},
+                         {"discover", false}, {"allocatorPeerId", peerC}, {"allocatorMultiaddr", addrC}};
+            logos::LpClient gifter("rln_gifter_module", meName);
+            json r = parseReply(gifter.invoke("request", json::array({args.dump()}), &err, 300000));
+            const bool landed = r.is_object() && (r.contains("leaf_index") || r.value("pending", false));
+            if (!landed) {
+                const std::string why = r.is_object() ? r.value("message", r.value("error", r.dump())) : (err.message.empty() ? "no reply from rln_gifter_module" : err.message);
+                const bool used = why.find("credential already used") != std::string::npos;
+                finish(used ? "refused" : "failed", r.is_object() ? r : json::object(),
+                       used ? "This game has already been claimed. Play another one to claim again." : why);
+                return;
+            }
+        } else if (!wait) {
+            json r = parseReply(rln->invoke("register_membership", json::array({registryId, rlnId, opts.dump()}), &err, 180000));
+            // No answer in time is not a refusal: the registration may be under way; the poll below tells.
+            const bool unanswered = !r.is_object() && err.code == "timeout";
+            if (!unanswered && (!r.is_object() || r.contains("error"))) {
+                std::string why = r.is_object() && r["error"].is_object() ? r["error"].value("message", r["error"].dump())
+                                : r.is_object() ? r["error"].dump() : (err.message.empty() ? "no reply from rln_module" : err.message);
+                if (u.is_object() && u.contains("error")) why += " (keystore: " + u["error"].dump() + ")";
+                finish("failed", r.is_object() ? r : json::object(), "rln_module could not start the registration: " + why);
+                return;
+            }
+        }
         // Poll the membership until the gifter's registration shows on chain (or fails).
-        for (int i = 0; i < 120; i++) {
+        // Testnet blocks are slow: a registration can show up minutes after the gifter sent it, and
+        // a record marked failed heals to active on the read after it lands, so only a refusal ends this.
+        for (int i = 0; i < 300; i++) {
             if (weak.expired()) return;
-            json st = parseReply(rln->invoke("get_membership_state", json::array({registryId, rlnId}), &err, 20000));
+            json st = parseReply(rln->invoke("get_membership_state", json::array({registryId, rlnId}), &err, 30000));
             const std::string state = st.is_object() ? st.value("state", std::string()) : "";
             if (state == "active") { finish("granted", st, ""); return; }
+            if (st.is_object() && st.contains("error") && st["error"].is_object() && st["error"].value("kind", std::string()) == "ambiguous_selection") {
+                finish("failed", st, "Your Basecamp's RLN keystore holds more than one membership for this registry, which liblogos_rln_module 0.12 can't choose between.");
+                return;
+            }
             if (state == "failed") {
                 const std::string why = st.value("failed_reason", std::string("the registration failed"));
+                const bool mayLand = why.find("may still land") != std::string::npos || why.find("confirmation_window") != std::string::npos
+                                  || why.find("not on chain") != std::string::npos;
+                if (mayLand && i < 299) { std::this_thread::sleep_for(std::chrono::seconds(3)); continue; }
                 const bool used = why.find("credential already used") != std::string::npos || why.find("credential_used") != std::string::npos;
                 finish(used ? "refused" : "failed", st, used ? "This game has already been claimed. Play another one to claim again." : why);
                 return;
             }
             std::this_thread::sleep_for(std::chrono::seconds(3));
         }
-        finish("failed", json::object(), "the membership did not become active within 6 minutes");
+        finish("failed", json::object(), "the membership did not become active within 15 minutes; it may still land (claim again to check)");
     });
     return json{{"ok", true}, {"state", "asking"}}.dump();
 }

@@ -1,0 +1,32 @@
+{
+  "name": "rln_gifter_module",
+  "version": "0.4.0",
+  "description": "Bridge for liblogos_rln_module delegated registration: answers its rln_gifter_module.request (gifterPeerId/gifterMultiaddr) through the membership allocation protocol (/logos/paymaster/rln-membership/1.0.0), with auth produced by pluggable auth provider modules",
+  "author": "Logos",
+  "type": "core",
+  "interface": "cdylib",
+  "category": "blockchain",
+  "main": "rln_gifter_module_plugin",
+  "dependencies": [
+    "libp2p_module"
+  ],
+  "include": [],
+  "capabilities": [],
+  "codegen": {
+    "rust": {
+      "crate": "rust-lib",
+      "trait": "RlnGifterModule"
+    }
+  },
+  "nix": {
+    "external_libraries": [],
+    "packages": {
+      "build": [],
+      "runtime": []
+    },
+    "cmake": {
+      "find_packages": [],
+      "extra_include_dirs": []
+    }
+  }
+}

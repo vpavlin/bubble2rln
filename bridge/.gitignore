@@ -1,0 +1,12 @@
+/result
+/result-*
+
+/logos-rust-sdk-src
+
+/rust-lib/generated
+
+target/
+
+*.lgx
+
+.DS_Store
