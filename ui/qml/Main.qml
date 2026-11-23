@@ -371,9 +371,9 @@ Item {
                     color: c.state === "granted" ? root.cOk : (c.state === "refused" || c.state === "failed") ? root.cBad : root.cSub
                     text: !root.claimable ? "This was a practice game (no LEZ block to seed it from), so it can't be claimed."
                         : c.state === "" ? "Claim your <b>RLN membership</b>: the gifter checks your proofs of work and registers you, 100 messages every 10 minutes."
-                        : c.state === "asking" ? "Asking the gifter… it checks your proofs, then registers the membership on chain (up to a few minutes)."
+                        : c.state === "asking" ? "Asking the gifter… it checks your proofs, then registers your node's RLN identity on the LEZ testnet. Testnet blocks are slow: this can take 5–15 minutes, and you can keep playing meanwhile."
                         : c.state === "granted" ? ("Membership <b>#" + res.leaf_index + "</b> registered" + (res.tx_hash ? " (tx " + String(res.tx_hash).slice(0, 12) + "…)" : "")
-                            + (res.demoIdentity ? ".<br>Demo identity: it is real on the registry, but this build has no RLN key of yours to send with." : "."))
+                            + (res.demoIdentity ? ".<br>Demo identity: it is real on the registry, but this build has no RLN key of yours to send with." : ".<br>It belongs to your Basecamp's messaging node, which sends with it from now on: open Chat and say hello."))
                         : (res.message || res.error || "The claim failed.")
                 }
                 Text {
