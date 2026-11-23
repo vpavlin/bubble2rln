@@ -68,6 +68,7 @@ Item {
 
     function startGame() {
         root.screen = "starting"; root.message = ""; root.fr = null; root.claim = { state: "", result: null }
+        root._buf = []; root._clock = 0; root._arriveMs = 0; root.boostKey = false
         callVia("newGame", ["{}"], function (raw) {
             var r = root.parse(raw)
             if (!r || !r.ok) { root.screen = "start"; root.message = (r && r.error) || "bubble_core did not answer."; return }
@@ -123,18 +124,21 @@ Item {
         var st = steer(); root._lastSteer = st
         root.inFlight++
         var sent = Date.now()
-        callVia("frame", [root.info.gameId, Math.round(st[0]), Math.round(st[1]), JSON.stringify({ w: Math.round(board.width), h: Math.round(board.height) })], function (raw) {
+        callVia("frame", [root.info.gameId, Math.round(st[0]), Math.round(st[1]), JSON.stringify({ w: Math.round(board.width), h: Math.round(board.height), boost: root.boostKey })], function (raw) {
             root.inFlight = Math.max(0, root.inFlight - 1)
             root._rttMs = root._rttMs > 0 ? 0.8 * root._rttMs + 0.2 * (Date.now() - sent) : (Date.now() - sent)
             var f = root.parse(raw)
             if (!f || !f.ok) return
             if (root.fr && f.tick <= root.fr.tick && !f.over && f.check.state === root.fr.check.state) return   // overtaken by a newer reply
-            // The camera glides from the last frame's to this one's over the measured gap
-            // between frames (drawing only: every position still comes from the core).
+            // Into the drawing buffer, placed on the game's own clock (the tick), so replies that
+            // arrive unevenly still draw evenly (drawing only: every position comes from the core).
             var now = Date.now()
-            if (root.fr && root.fr.world && f.world && f.tick > root.fr.tick && Math.abs(f.world[0] - root.fr.world[0]) + Math.abs(f.world[1] - root.fr.world[1]) < board.width / 3)
-            { root._prevWorld = [root.fr.world[0], root.fr.world[1]]; root._prevBots = root.botsById(root.fr) }
-            else { root._prevWorld = null; root._prevBots = null }
+            f._byId = root.botsById(f)
+            var buf = root._buf.filter(function (x) { return x.tick < f.tick })
+            buf.push(f); if (buf.length > 8) buf.shift()
+            root._buf = buf
+            var sample = now - f.tick * root.tickMs
+            root._clock = (root._clock === 0 || sample < root._clock) ? sample : root._clock + 0.02 * (sample - root._clock)
             if (root._arriveMs > 0) root._gapMs = Math.max(16, Math.min(200, 0.8 * root._gapMs + 0.2 * (now - root._arriveMs)))
             root._arriveMs = now
             root._frames++
@@ -155,8 +159,10 @@ Item {
     Timer { interval: 33; repeat: true; running: root.playing && root.activeNow; onTriggered: root.pump() }
     // Redraws between frames so the camera glide is smooth; only while a game is on.
     Timer { interval: 16; repeat: true; running: root.playing && root.activeNow && root.fr !== null; onTriggered: board.requestPaint() }
-    property var _prevWorld: null
-    property var _prevBots: null    // the last frame's bubbles by id, relative to its world corner
+    readonly property real tickMs: 1000 / 30
+    property var _buf: []           // recent frames, oldest first
+    property real _clock: 0         // local time of tick 0, as the replies show it (the earliest)
+    property bool boostKey: false   // space held
     property real _rttMs: 0         // a frame call's round trip, smoothed
     property real _paintMs: 0       // one board paint, smoothed
     function botsById(f) {
@@ -172,9 +178,14 @@ Item {
 
     Keys.onPressed: function (e) {
         if (e.key === Qt.Key_Escape) { root.giveUp(); return }
+        if (e.key === Qt.Key_Space) { root.boostKey = true; e.accepted = true; return }
         root.setKey(e.key, true)
     }
-    Keys.onReleased: function (e) { if (!e.isAutoRepeat) root.setKey(e.key, false) }
+    Keys.onReleased: function (e) {
+        if (e.isAutoRepeat) return
+        if (e.key === Qt.Key_Space) { root.boostKey = false; return }
+        root.setKey(e.key, false)
+    }
     function setKey(k, down) {
         var n = null
         if (k === Qt.Key_Left || k === Qt.Key_A) n = "left"
@@ -195,15 +206,20 @@ Item {
         renderStrategy: Canvas.Cooperative
         onPaint: {
             var t0 = Date.now()
-            var ctx = getContext("2d"), f = root.fr
+            var ctx = getContext("2d")
             ctx.fillStyle = root.cBg; ctx.fillRect(0, 0, width, height)
-            if (!f) return
+            var B = root._buf
+            if (!root.fr || B.length === 0) return
+            // Draw a little in the past (about two gaps between replies), between the two frames
+            // around that moment: a = before, f = after, t = how far between.
+            var at = (Date.now() - Math.max(50, Math.min(220, 2 * root._gapMs + 15)) - root._clock) / root.tickMs
+            var k = B.length - 1
+            while (k > 0 && B[k - 1].tick > at) k--
+            var f = B[k], a = k > 0 ? B[k - 1] : null, t = 1
+            if (a && at < f.tick) t = Math.max(0, (at - a.tick) / (f.tick - a.tick))
+            if (a && Math.abs(f.world[0] - a.world[0]) + Math.abs(f.world[1] - a.world[1]) > width / 3) a = null   // a respawn: no glide
             ctx.save()
-            var t = 1
-            if (root._prevWorld) {
-                t = Math.min(1, (Date.now() - root._arriveMs) / root._gapMs)
-                ctx.translate((1 - t) * (root._prevWorld[0] - f.world[0]), (1 - t) * (root._prevWorld[1] - f.world[1]))
-            }
+            if (a) ctx.translate((1 - t) * (a.world[0] - f.world[0]), (1 - t) * (a.world[1] - f.world[1]))
             // Grid and the world's edge: world = [x, y, size, grid step] in view px.
             var wx = f.world[0], wy = f.world[1], ws = f.world[2], step = f.world[3]
             ctx.strokeStyle = root.cLine; ctx.lineWidth = 1; ctx.beginPath()
@@ -225,7 +241,7 @@ Item {
                 ctx.fill()
             }
             // Bubbles move on their own: glide each from where the last frame had it.
-            var pb = root._prevWorld ? root._prevBots : null
+            var pb = a ? a._byId : null
             // Bubbles: [x, y, r, colour, danger]; 1 = could eat you (red ring), 2 = hunting you (two rings).
             for (var j = 0; j < f.bots.length; j++) {
                 var b = f.bots[j]
@@ -285,6 +301,11 @@ Item {
             Text { color: hud.me && hud.me.dotFeeds === 0 ? root.cAccent : root.cSub; font.pixelSize: 13
                 visible: hud.me && hud.me.dotFeeds !== undefined && hud.me.dotFeeds < 100
                 text: hud.me ? (hud.me.dotFeeds === 0 ? "Dots don't feed you any more: eat bubbles" : "Dots feed you " + hud.me.dotFeeds + " %") : "" }
+            Text { color: hud.me && hud.me.boost === "on" ? root.cAccent : root.cSub; font.pixelSize: 13
+                visible: hud.me && hud.me.boost !== undefined
+                text: hud.me ? ("Space: boost " + ({ ready: "ready", on: "now!", rest: "recharging", empty: "(needs food)" })[hud.me.boost]) : "" }
+            Text { color: root.cSub; font.pixelSize: 13; visible: hud.me && hud.me.slowedBy > 0
+                text: hud.me ? ("Full stomach: " + hud.me.slowedBy + " % slower") : "" }
             Text { color: root.cSub; font.pixelSize: 13
                 text: hud.proofs ? ("Digestion proofs: " + hud.proofs.found + " / " + hud.proofs.need + (hud.proofs.found < hud.proofs.need ? "  ·  " + Math.round(hud.proofs.hashRate) + " hashes/s" : "")) : "" }
             Rectangle { Layout.fillWidth: true; height: 6; radius: 3; color: root.cRaised
@@ -300,7 +321,7 @@ Item {
         visible: root.screen === "play"
         anchors { right: parent.right; top: parent.top; margins: 16 }
         color: root.cFaint; font.pixelSize: 12
-        text: "Steer with the mouse or the arrow keys · Esc gives up"
+        text: "Steer with the mouse (further = faster) or the arrow keys · Space boosts · Esc gives up"
     }
 
     // ── cards: start, checking, won, over
@@ -324,7 +345,8 @@ Item {
                     text: "Grow from a small bubble to the goal size. Eat the dots and anything at least 10% smaller than you; "
                         + "keep away from bubbles with a <font color='" + root.cBad + "'>red ring</font>. If one eats you, you lose only what you have not digested yet.<br><br>"
                         + "Dots feed you less as you grow, and past size 200 not at all: the rest you hunt. Food you haven't swallowed whole slowly goes. "
-                        + "Once you are past 100, the big <font color='" + root.cBad + "'>double-ringed</font> hunters come after you.<br><br>"
+                        + "Once you are past 100, the big <font color='" + root.cBad + "'>double-ringed</font> hunters come after you. "
+                        + "A full stomach slows you down; <b>Space</b> boosts you away, but burns some of what you have eaten.<br><br>"
                         + "What you eat goes to your stomach first. Your computer <b>digests</b> it by solving small proofs of work, so you grow only as fast as it can work. "
                         + "Reach the goal and the game, with its proofs, becomes your ticket for an <b>RLN membership</b>: your right to send messages on Logos Messaging."
                 }

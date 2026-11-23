@@ -155,6 +155,8 @@ struct Live {
     int64_t rateMs = 0;
     uint64_t rateHashes = 0;
     double rate = 0;
+    double viewScale = 0;      // the camera's zoom, eased towards the size's (drawing only)
+    int64_t viewScaleMs = 0;
 
     std::atomic<bool> stop{false};
     std::atomic<uint64_t> hashes{0};
@@ -332,7 +334,9 @@ std::string BubbleCoreImpl::frame(const std::string& gameId, int64_t dx, int64_t
     if (!g || g->id != gameId) return json{{"ok", false}, {"error", "no such game"}}.dump();
     json view = json::parse(viewJson, nullptr, false);
     double w = 800, h = 600;
+    bool boost = false;
     if (view.is_object()) {
+        if (view.contains("boost") && view["boost"].is_boolean()) boost = view["boost"].get<bool>();
         if (view.contains("w") && view["w"].is_number()) w = std::clamp(view["w"].get<double>(), 100.0, 8000.0);
         if (view.contains("h") && view["h"].is_number()) h = std::clamp(view["h"].get<double>(), 100.0, 8000.0);
     }
@@ -340,14 +344,26 @@ std::string BubbleCoreImpl::frame(const std::string& gameId, int64_t dx, int64_t
     g->lastFrameMs = nowMs();
     const Game& gm = *g->game;
     const int64_t mm = gm.mass();
-    const double scale = std::min(1.4, h / (700.0 + 7.0 * (double)radius(mm) / kU));
+    // The zoom follows the size, eased over ~0.4 s, so eating a bubble doesn't jolt the picture.
+    const double target = std::min(1.4, h / (700.0 + 7.0 * (double)radius(mm) / kU));
+    const int64_t nowF = nowMs();
+    if (g->viewScale <= 0 || nowF - g->viewScaleMs > 2000) g->viewScale = target;
+    else g->viewScale += (target - g->viewScale) * (1.0 - std::exp(-(double)(nowF - g->viewScaleMs) / 400.0));
+    g->viewScaleMs = nowF;
+    const double scale = g->viewScale;
     const double s = scale / kU, cx = w / 2 - gm.me.x * s, cy = h / 2 - gm.me.y * s;
     const double rMe = radius(mm) * s;
 
-    // Steering: towards the pointer; near the middle of the bubble = stand still.
+    // Steering: towards the pointer; near the middle of the bubble = stand still; the further the
+    // pointer, the faster (four steps over max(2 radii, 160 px)); boost while the view asks for it.
     if (!gm.over) {
-        if ((double)(dx * dx + dy * dy) < rMe * rMe * 0.25) g->dir = kStop;
-        else g->dir = dirOf(dx * 1000, dy * 1000);
+        const double dist = std::sqrt((double)(dx * dx + dy * dy));
+        if (dist < rMe * 0.5) g->dir = makeInput(kStop, 0, false);
+        else {
+            const double frac = (dist - rMe * 0.5) / std::max(2.0 * rMe, 160.0);
+            const int slower = 3 - std::min(3, (int)(frac * 4.0));
+            g->dir = makeInput(dirOf(dx * 1000, dy * 1000), slower, boost);
+        }
     }
 
     json bots = json::array(), pellets = json::array();
@@ -375,7 +391,10 @@ std::string BubbleCoreImpl::frame(const std::string& gameId, int64_t dx, int64_t
     json me = {{"r", std::lround(rMe)}, {"body", gm.me.body}, {"stomach", gm.me.stomach},
                {"stomachR", std::lround(mm ? rMe * std::sqrt((double)gm.me.stomach / (double)mm) : 0)},
                {"shield", gm.me.shield > 0}, {"deaths", gm.deaths}, {"start", g->params.start}, {"goal", g->params.goal},
-               {"digesting", waiting}, {"dotFeeds", dotQuarters(mm) * 25}};   // % of a dot that still feeds you
+               {"digesting", waiting}, {"dotFeeds", dotQuarters(mm) * 25},
+               {"boost", gm.me.boost > 0 ? "on" : gm.me.boost < 0 ? "rest" : (gm.me.stomach >= kBoostMin ? "ready" : "empty")},
+               {"slowedBy", std::min(kFullSlowMax, mm ? gm.me.stomach * kFullSlow / mm : 0)},
+               {"speed", 4 - (g->dir % kBoostBit) / kDirs1}};   // % slowed by a full stomach; speed in quarters   // % of a dot that still feeds you
     return json{{"ok", true}, {"tick", gm.tick}, {"seconds", gm.tick / kTickHz}, {"over", gm.over}, {"won", gm.won},
                 {"why", gm.why}, {"me", me}, {"scale", scale},
                 {"world", {std::lround(cx), std::lround(cy), std::lround(kWorld * s), std::lround(100 * kU * s)}},

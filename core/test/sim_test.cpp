@@ -34,7 +34,10 @@ static int decide(const Game& g) {
         if (kWorld - g.me.x < m) fx -= (m - (kWorld - g.me.x)) * 4000;
         if (g.me.y < m) fy += (m - g.me.y) * 4000;
         if (kWorld - g.me.y < m) fy -= (m - (kWorld - g.me.y)) * 4000;
-        return dirOf(fx, fy);
+        // A hunter on its tail and close: boost away.
+        bool close = false;
+        for (const auto& b : g.bots) if (b.hunt > 0 && std::llabs(b.x - g.me.x) + std::llabs(b.y - g.me.y) < radius(b.mass) + r + 150 * kU) close = true;
+        return makeInput(dirOf(fx, fy), 0, close);
     }
     int64_t bx = 0, by = 0, best = INT64_MIN; bool any = false;
     for (const auto& b : g.bots) {

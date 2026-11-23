@@ -10,6 +10,7 @@ namespace {
 const int COS[64] = {1024,1019,1004,980,946,903,851,792,724,650,569,483,392,297,200,100,0,-100,-200,-297,-392,-483,-569,-650,-724,-792,-851,-903,-946,-980,-1004,-1019,-1024,-1019,-1004,-980,-946,-903,-851,-792,-724,-650,-569,-483,-392,-297,-200,-100,0,100,200,297,392,483,569,650,724,792,851,903,946,980,1004,1019};
 const int SIN[64] = {0,100,200,297,392,483,569,650,724,792,851,903,946,980,1004,1019,1024,1019,1004,980,946,903,851,792,724,650,569,483,392,297,200,100,0,-100,-200,-297,-392,-483,-569,-650,-724,-792,-851,-903,-946,-980,-1004,-1019,-1024,-1019,-1004,-980,-946,-903,-851,-792,-724,-650,-569,-483,-392,-297,-200,-100};
 
+constexpr int64_t kMaxSpeed = 110;      // units per tick
 constexpr int64_t kRetarget = 12;       // ticks between a bot's decisions
 constexpr int64_t kSight = 450 * kU;    // how far a bot looks
 constexpr int64_t kShield = 90;         // ticks a respawned player can't be eaten
@@ -20,9 +21,10 @@ int64_t sgn(int64_t v) { return v > 0 ? 1 : (v < 0 ? -1 : 0); }
 int64_t clampW(int64_t v) { return v < 0 ? 0 : (v > kWorld ? kWorld : v); }
 int64_t cellOf(int64_t x, int64_t y) { return (y / kCell) * kCells + x / kCell; }
 
+// Bigger is slower; nothing is quicker than kMaxSpeed (a bubble of about 26).
 int64_t speed(int64_t mass) {
     int64_t v = 2400 / isqrt(mass * 16 + 64);
-    return v < 6 ? 6 : v;
+    return v < 6 ? 6 : (v > kMaxSpeed ? kMaxSpeed : v);
 }
 
 void moveAt(int64_t& x, int64_t& y, int dir, int64_t s) {
@@ -100,7 +102,7 @@ bool Params::fromJson(const json& j, Params& o) {
 Game::Game(const std::string& seedHex, const Params& params) : p(params) {
     for (int i = 0; i < 4; i++) rng.s[i] = seedHex.size() >= 32 ? hexWord(seedHex, i * 8) : 0;
     if ((rng.s[0] | rng.s[1] | rng.s[2] | rng.s[3]) == 0) rng.s[0] = 1;
-    me = {kWorld / 2, kWorld / 2, p.start, 0, kStop, kShield};
+    me = {kWorld / 2, kWorld / 2, p.start, 0, kStop, kShield, 0, 0};
     for (int i = 0; i < kPellets; i++) pellets.push_back(spawnPellet());
     grid_.assign(kCells * kCells, {});
     eatenBy_.assign(kPellets, -1);
@@ -196,8 +198,8 @@ void Game::botThink(Bot& b, size_t idx) {
 std::string Game::step(int input, const std::vector<int64_t>& digests) {
     if (over) return "the game is over";
     if (input != -1) {
-        if (input < 0 || input > kStop) return "bad input at tick " + std::to_string(tick);
-        me.dir = input;
+        if (input < 0 || input > kInputMax) return "bad input at tick " + std::to_string(tick);
+        me.input = input;
     }
     for (int64_t c : digests) {
         if (c != chunks) return "chunk " + std::to_string(c) + " out of order at tick " + std::to_string(tick);
@@ -207,8 +209,25 @@ std::string Game::step(int input, const std::vector<int64_t>& digests) {
         queue.erase(queue.begin());
         me.stomach -= p.chunk; me.body += p.chunk; chunks++;
     }
-    move(me.x, me.y, me.dir, mass(), true);   // the player is 15% quicker than a bot its size
-    const int64_t huntSpeed = speed(mass()) * 115 / 100 * kHuntSpeed / 100;
+    {
+        // The player is 15% quicker than a bot its size; slower with a full stomach, slower still
+        // at a lower throttle; a boost burns food for a dash.
+        const int dir = me.input % kDirs1, throttle = (me.input % kBoostBit) / kDirs1;   // throttle: 0 full .. 3 a quarter
+        if (me.boost > 0) { if (--me.boost == 0) me.boost = -kBoostRest; }
+        else if (me.boost < 0) me.boost++;
+        if (me.boost == 0 && me.input >= kBoostBit && me.stomach >= kBoostMin && dir != kStop) {
+            me.stomach -= std::max(kBoostMin, me.stomach / 10);
+            while (!queue.empty() && me.stomach < p.chunk * (int64_t)queue.size()) queue.pop_back();
+            me.boost = kBoostTicks;
+        }
+        const int64_t mm = mass();
+        int64_t s = speed(mm) * 115 / 100;
+        s = s * (100 - std::min(kFullSlowMax, me.stomach * kFullSlow / mm)) / 100;
+        s = s * (4 - throttle) / 4;
+        if (me.boost > 0) s = speed(mm) * 115 / 100 * kBoostSpeed / 100;
+        moveAt(me.x, me.y, dir, s);
+    }
+    const int64_t huntSpeed = speed(mass()) * 115 / 100 * kHuntSpeed / 100;   // of the player's top speed
     for (size_t i = 0; i < bots.size(); i++) {
         Bot& b = bots[i];
         botThink(b, i);
@@ -278,7 +297,7 @@ std::string Game::stateHash() const {
 uint32_t Game::stateHash32() const {
     uint32_t h = 0x811c9dc5u;
     auto mix = [&](int64_t v) { h = (h ^ (uint32_t)v) * 16777619u; };
-    mix(tick); mix(deaths); mix(me.shield); mix(me.x); mix(me.y); mix(me.body); mix(me.stomach); mix(chunks); mix(me.crumbs);
+    mix(tick); mix(deaths); mix(me.shield); mix(me.x); mix(me.y); mix(me.body); mix(me.stomach); mix(chunks); mix(me.crumbs); mix(me.input); mix(me.boost);
     for (int i = 0; i < 4; i++) mix(rng.s[i]);
     for (const auto& b : bots) { mix(b.x); mix(b.y); mix(b.mass); mix(b.dir); mix(b.hunt); }
     for (const auto& pl : pellets) { mix(pl.x); mix(pl.y); }

@@ -12,9 +12,13 @@
 
 namespace bubble {
 
-constexpr int kSimVersion = 3;   // 3: dots feed less as you grow, hunters, hunger
+constexpr int kSimVersion = 3;   // 3: dots feed less as you grow, hunters, hunger, speed, boost
 constexpr int kDirs = 64;
-constexpr int kStop = 64;              // input: stand still
+constexpr int kStop = 64;              // heading: stand still
+// An input is heading + kDirs1 * slower + kBoostBit: heading 0..63 or kStop, slower 0..3
+// (full speed, 3/4, 1/2, 1/4), plus kBoostBit to boost when the boost is ready.
+constexpr int kDirs1 = 65, kBoostBit = 4 * kDirs1, kInputMax = 2 * kBoostBit - 1;
+inline int makeInput(int dir, int slower, bool boost) { return dir + kDirs1 * slower + (boost ? kBoostBit : 0); }
 constexpr int64_t kU = 16;             // units per px
 constexpr int64_t kWorld = 2400 * kU;  // square world side
 constexpr int kPellets = 320;
@@ -29,7 +33,12 @@ constexpr int64_t kDotFull = 100, kDotHalf = 150, kDotQuarter = 200;
 constexpr int64_t kHungerTicks = 30;
 // A hunter that sees the player (once it is past kDotFull, and could eat it) follows it for kHuntTicks, then rests for
 // kRestTicks; while hunting it moves at kHuntSpeed % of the player's speed.
-constexpr int64_t kHuntSight = 700 * kU, kHuntTicks = 240, kRestTicks = 180, kHuntSpeed = 88;
+constexpr int64_t kHuntSight = 700 * kU, kHuntTicks = 450, kRestTicks = 180, kHuntSpeed = 88;
+// A full stomach slows you: by stomach/mass * kFullSlow %, at most kFullSlowMax %.
+constexpr int64_t kFullSlow = 90, kFullSlowMax = 45;
+// A boost: kBoostTicks at kBoostSpeed % of your speed, then kBoostRest before the next; it burns
+// a tenth of the stomach (at least kBoostMin), whole chunks too (their proofs are lost).
+constexpr int64_t kBoostTicks = 12, kBoostSpeed = 220, kBoostRest = 75, kBoostMin = 2;
 
 struct Params {
     int64_t start = 10, goal = 300, chunk = 5, minTicks = 1800, maxTicks = 36000;
@@ -38,7 +47,7 @@ struct Params {
     static bool fromJson(const nlohmann::json& j, Params& out);
 };
 
-struct Me { int64_t x, y, body, stomach; int dir; int64_t shield; int64_t crumbs = 0; };
+struct Me { int64_t x, y, body, stomach; int input; int64_t shield; int64_t crumbs = 0, boost = 0; };   // boost > 0 boosting, < 0 resting
 struct Bot {
     int64_t x, y, mass; int dir; int64_t wait;
     bool hunter = false;
