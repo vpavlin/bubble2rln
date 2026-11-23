@@ -21,6 +21,8 @@ while (!(f.over && f.check.state === "done")) {
         const x = f.pellets[i] - 500, y = f.pellets[i + 1] - 350, d = Math.abs(x) + Math.abs(y);
         if (d < bd) { bd = d; dx = x; dy = y; }
     }
+    // Full speed: the pointer's distance sets the speed (core 0.3), so point far along the line.
+    const len = Math.hypot(dx, dy) || 1; dx = dx / len * 2000; dy = dy / len * 2000;
     f = call("frame", "str:" + g0.gameId, String(Math.round(dx)), String(Math.round(dy)), view); calls++;
     if (calls % 20 === 0) console.log(`  t=${f.seconds.toFixed(1)}s size ${f.me.body}/${f.me.goal} stomach ${f.me.stomach} proofs ${f.proofs.found}/${f.proofs.need} queued ${f.proofs.queued}${f.me.digesting ? " (digesting)" : ""} ${Math.round(f.proofs.hashRate)} h/s deaths ${f.me.deaths}`);
     if (f.over && !f.won) throw new Error("lost: " + f.why);

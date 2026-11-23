@@ -63,8 +63,18 @@ static int sweep(const Game& g) {
     return dirOf(tx - g.me.x, ty - g.me.y);
 }
 
+// The e2e script's bot: the nearest dot, full speed, a new decision every 12 ticks (logosctl lag).
+static int dotBot(const Game& g) {
+    static int last = kStop;
+    if (g.tick % 12 != 0) return last;
+    int64_t bx = 0, by = 0, best = INT64_MAX;
+    for (const auto& p : g.pellets) { int64_t d = std::llabs(p.x - g.me.x) + std::llabs(p.y - g.me.y); if (d < best) { best = d; bx = p.x; by = p.y; } }
+    return last = dirOf(bx - g.me.x, by - g.me.y);
+}
+
+static int64_t gGoal = 300;
 static void playMany(const char* name, int (*pick)(const Game&), int games) {
-    Params p;
+    Params p; p.goal = gGoal; if (gGoal < 300) p.minTicks = 300;
     int wins = 0, eaten = 0; int64_t ticks = 0, best = 0;
     for (int i = 0; i < games; i++) {
         unsigned char s[32]; char hex[65];
@@ -173,6 +183,7 @@ int main(int argc, char** argv) {
 
     playMany("sweeper", sweep, games);
     playMany("greedy", decide, games);
+    gGoal = 40; playMany("dot bot, goal 40", dotBot, games); gGoal = 300;
 
     // (3) tampering, (4) proof of work, on a short game with real nonces at 4 bits.
     {

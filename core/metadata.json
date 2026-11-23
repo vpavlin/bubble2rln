@@ -2,7 +2,7 @@
   "name": "bubble_core",
   "display_name": "Bubble Core",
   "icon": "icon.png",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "core",
   "interface": "universal",
   "category": "games",

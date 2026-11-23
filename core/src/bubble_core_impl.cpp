@@ -54,13 +54,14 @@ int64_t wallMs() {
 // The gifter this build claims from by default: its libp2p peer id and address, and the
 // registry (config account, base58) it serves. BUBBLE_GIFTER_PEER / BUBBLE_GIFTER_ADDR /
 // BUBBLE_REGISTRY override them; claim()'s options override everything.
-// The default is the public gifter on the VPS (deploy/vps): it registers on its own devnet
-// registry, so the claim uses the demo identity there.
+// The default is the public gifter on the VPS (deploy/vps): it registers on the LEZ testnet
+// registry (the one Logos Delivery's logos.test preset trusts) through liblogos_lez_rln_module;
+// the claim uses a demo identity unless BUBBLE_IDENTITY=rln.
 struct GifterDefaults {
     std::string peer = "16Uiu2HAkx4HRjCAN4HCWZyqXn7ZxnDGhxQhcpDuBhANBhx3VXP88";
     std::string addr = "/ip4/128.140.55.128/tcp/9101";
-    std::string registry = "APtni2RgeHkW6HChE1VL1jgdnUr1jyd1smV13JjDPk74";
-    std::string network = "local", identity = "demo";
+    std::string registry = "J3NXPWUspX2zqJU3tUbR6MHmm83aJc5AzvidEaBBKnat";   // the LEZ testnet registry Delivery trusts
+    std::string network = "testnet", identity = "demo";
 };
 GifterDefaults gifterDefaults() {
     GifterDefaults g;

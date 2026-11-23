@@ -11,6 +11,7 @@ const int COS[64] = {1024,1019,1004,980,946,903,851,792,724,650,569,483,392,297,
 const int SIN[64] = {0,100,200,297,392,483,569,650,724,792,851,903,946,980,1004,1019,1024,1019,1004,980,946,903,851,792,724,650,569,483,392,297,200,100,0,-100,-200,-297,-392,-483,-569,-650,-724,-792,-851,-903,-946,-980,-1004,-1019,-1024,-1019,-1004,-980,-946,-903,-851,-792,-724,-650,-569,-483,-392,-297,-200,-100};
 
 constexpr int64_t kMaxSpeed = 110;      // units per tick
+constexpr int64_t kBotMaxSpeed = 80;
 constexpr int64_t kRetarget = 12;       // ticks between a bot's decisions
 constexpr int64_t kSight = 450 * kU;    // how far a bot looks
 constexpr int64_t kShield = 90;         // ticks a respawned player can't be eaten
@@ -21,11 +22,13 @@ int64_t sgn(int64_t v) { return v > 0 ? 1 : (v < 0 ? -1 : 0); }
 int64_t clampW(int64_t v) { return v < 0 ? 0 : (v > kWorld ? kWorld : v); }
 int64_t cellOf(int64_t x, int64_t y) { return (y / kCell) * kCells + x / kCell; }
 
-// Bigger is slower; nothing is quicker than kMaxSpeed (a bubble of about 26).
+// Bigger is slower. The player is never quicker than kMaxSpeed (a bubble of about 26) and a
+// bot never quicker than kBotMaxSpeed, so a small player still outruns what chases it.
 int64_t speed(int64_t mass) {
     int64_t v = 2400 / isqrt(mass * 16 + 64);
     return v < 6 ? 6 : (v > kMaxSpeed ? kMaxSpeed : v);
 }
+int64_t botSpeed(int64_t mass) { return std::min(speed(mass), kBotMaxSpeed); }
 
 void moveAt(int64_t& x, int64_t& y, int dir, int64_t s) {
     if (dir == kStop) return;
@@ -33,9 +36,6 @@ void moveAt(int64_t& x, int64_t& y, int dir, int64_t s) {
     y = clampW(y + SIN[dir] * s / 1024);
 }
 
-void move(int64_t& x, int64_t& y, int dir, int64_t mass, bool boost) {
-    moveAt(x, y, dir, boost ? speed(mass) * 115 / 100 : speed(mass));
-}
 
 
 
@@ -163,12 +163,26 @@ void Game::markPellets(int64_t x, int64_t y, int64_t r, int who) {
 void Game::botThink(Bot& b, size_t idx) {
     if (b.hunter) {
         const int64_t mm = mass(), dx = me.x - b.x, dy = me.y - b.y;
-        const bool canEat = b.mass * 10 >= mm * 11 && me.shield == 0 && mm >= kDotFull;   // small ones are left to graze
+        const bool canEat = b.mass * 10 >= mm * 11 && me.shield == 0 && mm >= kHuntFrom;   // small ones are left to graze
         if (b.hunt < 0) b.hunt++;
         else if (b.hunt > 0) {
             if (!canEat) b.hunt = -kRestTicks;
             else if (--b.hunt == 0) b.hunt = -kRestTicks;
-            else { if (b.hunt % 3 == 0) b.dir = dirOf(dx, dy); return; }
+            else {
+                // Aim where the player will be (up to kLeadTicks ahead on its heading): a straight
+                // line runs into a hunter, a turn shakes it off.
+                if (b.hunt % 3 == 0) {
+                    const int pdir = me.input % kDirs1;
+                    int64_t lx = 0, ly = 0;
+                    if (pdir != kStop) {
+                        const int64_t ps = speed(mm) * 115 / 100, hs = std::max<int64_t>(1, ps * kHuntSpeed / 100);
+                        const int64_t t = std::min<int64_t>(kLeadTicks, (std::llabs(dx) + std::llabs(dy)) / hs);
+                        lx = COS[pdir] * ps / 1024 * t; ly = SIN[pdir] * ps / 1024 * t;
+                    }
+                    b.dir = dirOf(dx + lx, dy + ly);
+                }
+                return;
+            }
         } else if (canEat && std::llabs(dx) < kHuntSight && std::llabs(dy) < kHuntSight) {
             b.hunt = kHuntTicks; b.dir = dirOf(dx, dy); return;
         }
@@ -190,6 +204,7 @@ void Game::botThink(Bot& b, size_t idx) {
     };
     consider(me.x, me.y, mm);
     for (size_t i = 0; i < bots.size(); i++) if (i != idx) consider(bots[i].x, bots[i].y, bots[i].mass);
+    b.fleeing = threat;
     if (threat) b.dir = dirOf(fx, fy);
     else if (best >= 0 && rng.below(4) != 0) b.dir = dirOf(tx, ty);
     else if (rng.below(3) == 0) b.dir = (int)rng.below(kDirs);
@@ -228,11 +243,12 @@ std::string Game::step(int input, const std::vector<int64_t>& digests) {
         moveAt(me.x, me.y, dir, s);
     }
     const int64_t huntSpeed = speed(mass()) * 115 / 100 * kHuntSpeed / 100;   // of the player's top speed
+    const int64_t fleeSpeed = speed(mass()) * 115 / 100 * kFleeSpeed / 100;   // prey: a chaser catches up, a passer-by doesn't
     for (size_t i = 0; i < bots.size(); i++) {
         Bot& b = bots[i];
         botThink(b, i);
-        if (b.hunt > 0) moveAt(b.x, b.y, b.dir, std::max(huntSpeed, speed(b.mass)));
-        else move(b.x, b.y, b.dir, b.mass, false);
+        if (b.hunt > 0) moveAt(b.x, b.y, b.dir, std::max(huntSpeed, botSpeed(b.mass)));
+        else moveAt(b.x, b.y, b.dir, b.fleeing ? std::min(speed(b.mass), fleeSpeed) : botSpeed(b.mass));
     }
 
     // Pellets: each goes to the first mover (the player, then the bots in order) whose circle
@@ -274,8 +290,8 @@ std::string Game::step(int input, const std::vector<int64_t>& digests) {
         if (bots[a].mass > 600 && (tick + (int64_t)a) % 30 == 0) bots[a].mass -= 1;
     }
     if (me.shield > 0) me.shield--;
-    // Hunger: what isn't a whole chunk yet slowly goes.
-    if (tick % kHungerTicks == kHungerTicks - 1 && me.stomach > p.chunk * (int64_t)queue.size()) me.stomach--;
+    // Hunger (past kDotFull; small ones graze in peace): what isn't a whole chunk yet slowly goes.
+    if (tick % kHungerTicks == kHungerTicks - 1 && mass() >= kDotFull && me.stomach > p.chunk * (int64_t)queue.size()) me.stomach--;
     tick++;
     // Whole chunks in the stomach join the digestion queue, each bound to this tick and state.
     if (me.stomach >= p.chunk * (int64_t)(queue.size() + 1) && chunks + (int64_t)queue.size() < p.chunksNeeded()) {
@@ -299,7 +315,7 @@ uint32_t Game::stateHash32() const {
     auto mix = [&](int64_t v) { h = (h ^ (uint32_t)v) * 16777619u; };
     mix(tick); mix(deaths); mix(me.shield); mix(me.x); mix(me.y); mix(me.body); mix(me.stomach); mix(chunks); mix(me.crumbs); mix(me.input); mix(me.boost);
     for (int i = 0; i < 4; i++) mix(rng.s[i]);
-    for (const auto& b : bots) { mix(b.x); mix(b.y); mix(b.mass); mix(b.dir); mix(b.hunt); }
+    for (const auto& b : bots) { mix(b.x); mix(b.y); mix(b.mass); mix(b.dir); mix(b.hunt); mix(b.fleeing); }
     for (const auto& pl : pellets) { mix(pl.x); mix(pl.y); }
     return h;
 }
