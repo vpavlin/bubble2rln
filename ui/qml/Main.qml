@@ -2,7 +2,8 @@
 //
 // A thin view. bubble_core runs the game (rules, loop, record, proof of work, check); this view
 // only steers and draws. While a game is on it asks for a frame about 30 times a second
-// (one call in flight at a time): it sends where the pointer is and gets back the visible world
+// (up to three calls in flight, so a slow round trip doesn't cap the rate; a reply older than the
+// one already drawn is dropped): it sends where the pointer is and gets back the visible world
 // in view pixels. When it stops asking (hidden, closed), the core pauses the game.
 // Every core call goes through callVia (logos.callModuleAsync; never a blocking call in a view).
 
@@ -55,7 +56,7 @@ Item {
     property string message: ""
     property var info: null             // newGame's reply: gameId, params, pow, chunks, threads
     property var fr: null               // the last frame
-    property bool inFlight: false
+    property int inFlight: 0
     property real mouseX: -1
     property real mouseY: -1
     property var keys: ({})
@@ -118,19 +119,22 @@ Item {
     property var _lastSteer: [0, 0]
 
     function pump() {
-        if (root.inFlight || !root.info) return
+        if (root.inFlight >= 3 || !root.info) return
         var st = steer(); root._lastSteer = st
-        root.inFlight = true
+        root.inFlight++
+        var sent = Date.now()
         callVia("frame", [root.info.gameId, Math.round(st[0]), Math.round(st[1]), JSON.stringify({ w: Math.round(board.width), h: Math.round(board.height) })], function (raw) {
-            root.inFlight = false
+            root.inFlight = Math.max(0, root.inFlight - 1)
+            root._rttMs = root._rttMs > 0 ? 0.8 * root._rttMs + 0.2 * (Date.now() - sent) : (Date.now() - sent)
             var f = root.parse(raw)
             if (!f || !f.ok) return
+            if (root.fr && f.tick <= root.fr.tick && !f.over && f.check.state === root.fr.check.state) return   // overtaken by a newer reply
             // The camera glides from the last frame's to this one's over the measured gap
             // between frames (drawing only: every position still comes from the core).
             var now = Date.now()
-            if (root.fr && root.fr.world && f.world && Math.abs(f.world[0] - root.fr.world[0]) + Math.abs(f.world[1] - root.fr.world[1]) < board.width / 3)
-                root._prevWorld = [root.fr.world[0], root.fr.world[1]]
-            else root._prevWorld = null
+            if (root.fr && root.fr.world && f.world && f.tick > root.fr.tick && Math.abs(f.world[0] - root.fr.world[0]) + Math.abs(f.world[1] - root.fr.world[1]) < board.width / 3)
+            { root._prevWorld = [root.fr.world[0], root.fr.world[1]]; root._prevBots = root.botsById(root.fr) }
+            else { root._prevWorld = null; root._prevBots = null }
             if (root._arriveMs > 0) root._gapMs = Math.max(16, Math.min(200, 0.8 * root._gapMs + 0.2 * (now - root._arriveMs)))
             root._arriveMs = now
             root._frames++
@@ -152,6 +156,14 @@ Item {
     // Redraws between frames so the camera glide is smooth; only while a game is on.
     Timer { interval: 16; repeat: true; running: root.playing && root.activeNow && root.fr !== null; onTriggered: board.requestPaint() }
     property var _prevWorld: null
+    property var _prevBots: null    // the last frame's bubbles by id, relative to its world corner
+    property real _rttMs: 0         // a frame call's round trip, smoothed
+    property real _paintMs: 0       // one board paint, smoothed
+    function botsById(f) {
+        var m = {}
+        for (var j = 0; j < f.bots.length; j++) { var b = f.bots[j]; m[b[3]] = [b[0] - f.world[0], b[1] - f.world[1]] }
+        return m
+    }
     property real _arriveMs: 0
     property real _gapMs: 33
     property int _frames: 0
@@ -182,12 +194,14 @@ Item {
         visible: root.fr !== null
         renderStrategy: Canvas.Cooperative
         onPaint: {
+            var t0 = Date.now()
             var ctx = getContext("2d"), f = root.fr
             ctx.fillStyle = root.cBg; ctx.fillRect(0, 0, width, height)
             if (!f) return
             ctx.save()
+            var t = 1
             if (root._prevWorld) {
-                var t = Math.min(1, (Date.now() - root._arriveMs) / root._gapMs)
+                t = Math.min(1, (Date.now() - root._arriveMs) / root._gapMs)
                 ctx.translate((1 - t) * (root._prevWorld[0] - f.world[0]), (1 - t) * (root._prevWorld[1] - f.world[1]))
             }
             // Grid and the world's edge: world = [x, y, size, grid step] in view px.
@@ -200,18 +214,26 @@ Item {
             for (var y = gy0; y <= gy1; y += step) { ctx.moveTo(left, y); ctx.lineTo(right, y) }
             ctx.stroke()
             ctx.strokeStyle = root.cFaint; ctx.lineWidth = 3; ctx.strokeRect(wx, wy, ws, ws)
-            // Dots: flat [x, y, colour, …].
+            // Dots: flat [x, y, colour, …]; one path per colour.
             var pr = Math.max(2, 3 * f.scale), p = f.pellets
-            for (var i = 0; i < p.length; i += 3) {
-                ctx.fillStyle = root.bubbleColours[p[i + 2]]
-                ctx.beginPath(); ctx.arc(p[i], p[i + 1], pr, 0, 2 * Math.PI); ctx.fill()
+            for (var c = 0; c < 6; c++) {
+                ctx.fillStyle = root.bubbleColours[c]; ctx.beginPath()
+                for (var i = 0; i < p.length; i += 3) {
+                    if (p[i + 2] !== c) continue
+                    ctx.moveTo(p[i] + pr, p[i + 1]); ctx.arc(p[i], p[i + 1], pr, 0, 2 * Math.PI)
+                }
+                ctx.fill()
             }
+            // Bubbles move on their own: glide each from where the last frame had it.
+            var pb = root._prevWorld ? root._prevBots : null
             // Bubbles: [x, y, r, colour, dangerous]; the dangerous ones get a red ring.
             for (var j = 0; j < f.bots.length; j++) {
                 var b = f.bots[j]
                 ctx.globalAlpha = 0.85
                 ctx.fillStyle = root.bubbleColours[b[3] % root.bubbleColours.length]
-                ctx.beginPath(); ctx.arc(b[0], b[1], b[2], 0, 2 * Math.PI); ctx.fill()
+                var bx = b[0], by = b[1], was = pb ? pb[b[3]] : undefined
+                if (was) { bx = f.world[0] + was[0] + t * (b[0] - f.world[0] - was[0]); by = f.world[1] + was[1] + t * (b[1] - f.world[1] - was[1]) }
+                ctx.beginPath(); ctx.arc(bx, by, b[2], 0, 2 * Math.PI); ctx.fill()
                 ctx.globalAlpha = 1
                 if (b[4]) { ctx.strokeStyle = root.cBad; ctx.lineWidth = 3; ctx.stroke() }
             }
@@ -229,6 +251,8 @@ Item {
                 ctx.strokeStyle = "#ffffff"; ctx.globalAlpha = 0.6; ctx.lineWidth = 3
                 ctx.beginPath(); ctx.arc(cx, cy, me.r + 5, 0, 2 * Math.PI); ctx.stroke(); ctx.globalAlpha = 1
             }
+            var pm = Date.now() - t0
+            root._paintMs = root._paintMs > 0 ? 0.9 * root._paintMs + 0.1 * pm : pm
         }
         MouseArea {
             anchors.fill: parent
@@ -264,7 +288,8 @@ Item {
             Text { color: root.cFaint; font.pixelSize: 12
                 text: root.fr ? ((root.fr.me.shield && root.fr.me.deaths > 0 ? "Eaten! Your digested size is safe.  ·  " : "")
                     + Math.floor(root.fr.seconds / 60) + ":" + ("0" + Math.floor(root.fr.seconds) % 60).slice(-2)
-                    + (root.fps > 0 ? "  ·  " + root.fps + " frames/s" : "")) : "" }
+                    + (root.fps > 0 ? "  ·  " + root.fps + " frames/s" : "")
+                    + (root._rttMs > 0 ? "  ·  call " + Math.round(root._rttMs) + " ms  ·  draw " + Math.round(root._paintMs) + " ms" : "")) : "" }
         }
     }
     Text {
