@@ -221,6 +221,7 @@ std::string Game::step(int input, const std::vector<int64_t>& digests) {
         if (chunks >= p.chunksNeeded()) return "chunk " + std::to_string(c) + " beyond the goal at tick " + std::to_string(tick);
         if (me.stomach < p.chunk || queue.empty()) return "chunk " + std::to_string(c) + " with nothing to digest at tick " + std::to_string(tick);
         digested.push_back(queue.front());
+        allDigested.push_back(queue.front());
         queue.erase(queue.begin());
         me.stomach -= p.chunk; me.body += p.chunk; chunks++;
     }
@@ -273,8 +274,10 @@ std::string Game::step(int input, const std::vector<int64_t>& digests) {
         Bot& ba = bots[a];
         int64_t ra = radius(ba.mass);
         if (me.shield == 0 && eats(ba.x, ba.y, ba.mass, ra, me.x, me.y, mass())) {
-            // Eaten: the bot gets what was still undigested; the digested body is safe.
-            ba.mass += me.stomach; ra = radius(ba.mass);
+            // Eaten: the bot gets what was still undigested and part of the body.
+            const int64_t keep = chunks * kKeepPct / 100;
+            ba.mass += me.stomach + (chunks - keep) * p.chunk; ra = radius(ba.mass);
+            chunks = keep; me.body = p.start + keep * p.chunk; digested.resize((size_t)keep);
             me.stomach = 0; me.crumbs = 0; deaths++; me.shield = kShield;
             queue.clear();   // the proofs being searched for are lost with the food
             me.x = rng.below(kWorld); me.y = rng.below(kWorld);
@@ -368,7 +371,7 @@ json replay(const std::string& seedHex, const Params& p, const Record& rec, std:
     }
     if (ii != rec.inputs.size() || di != rec.digests.size()) return {{"ok", false}, {"reason", "entries after the end"}};
     if (!g.won) return {{"ok", false}, {"reason", g.over ? ("lost: " + g.why) : "goal not reached"}, {"ticks", g.tick}, {"body", g.me.body}};
-    if (digested) *digested = g.digested;
+    if (digested) *digested = g.allDigested;
     return {{"ok", true}, {"reason", ""}, {"ticks", g.tick}, {"body", g.me.body}, {"chunks", g.chunks}, {"deaths", g.deaths}, {"hash", g.stateHash()}};
 }
 

@@ -479,9 +479,15 @@ std::string BubbleCoreImpl::produce_auth(const std::string& requestJson) {
     c.beaconId = g->beacon.id;
     memcpy(c.pub, g->pk, 32);
     c.end = (uint32_t)g->rec.end;
-    if (g->game->digested.size() != g->rec.digests.size()) return json{{"error", "the record and the game disagree"}}.dump();
-    for (size_t i = 0; i < g->rec.digests.size(); i++)
-        c.chunks.push_back({(uint32_t)g->game->digested[i].tick, g->game->digested[i].hash, std::get<2>(g->rec.digests[i])});
+    // The claim's proofs are the last life's: chunk i's nonce is the last one the record has for i.
+    std::vector<uint32_t> nonceOf(g->game->digested.size(), 0);
+    std::vector<bool> seen(g->game->digested.size(), false);
+    for (const auto& [t, chunk, nonce] : g->rec.digests)
+        if (chunk >= 0 && (size_t)chunk < nonceOf.size()) { nonceOf[(size_t)chunk] = nonce; seen[(size_t)chunk] = true; }
+    for (size_t i = 0; i < g->game->digested.size(); i++) {
+        if (!seen[i]) return json{{"error", "the record and the game disagree"}}.dump();
+        c.chunks.push_back({(uint32_t)g->game->digested[i].tick, g->game->digested[i].hash, nonceOf[i]});
+    }
     const std::string audience = args.contains("audience") && args["audience"].is_string() ? args["audience"].get<std::string>() : "";
     unsigned char digest[32];
     bindingDigest(req["domain"], kAuthType, act, audience, encodeClaim(c, false), digest);

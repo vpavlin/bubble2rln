@@ -24,7 +24,7 @@ constexpr int64_t kWorld = 2400 * kU;  // square world side
 constexpr int kPellets = 320;
 constexpr int kBots = 24;
 constexpr int kTickHz = 30;
-constexpr int kHunters = 3;            // the last kHunters bots hunt the player
+constexpr int kHunters = 2;            // the last kHunters bots hunt the player
 
 // Dots feed in quarters: fully while small, less and less as you grow, then not at all,
 // so the second half of the way to the goal has to be eaten off other bubbles.
@@ -33,10 +33,13 @@ constexpr int64_t kDotFull = 100, kDotHalf = 150, kDotQuarter = 200;
 constexpr int64_t kHungerTicks = 30;
 // A hunter that sees the player (once it is past kHuntFrom, and could eat it) follows it for kHuntTicks, then rests for
 // kRestTicks; while hunting it moves at kHuntSpeed % of the player's speed.
-constexpr int64_t kHuntFrom = 60;
+constexpr int64_t kHuntFrom = 120;
+// Being eaten: the undigested food goes, and of the digested body only kKeepPct % stays
+// (whole chunks; the rest must be eaten and digested again, with new proofs). 0 = start over.
+constexpr int64_t kKeepPct = 50;
 constexpr int64_t kLeadTicks = 45;   // how far ahead a hunter aims
 constexpr int64_t kFleeSpeed = 80;   // a fleeing bot: % of the player's top speed (at most its own)   // hunters leave smaller players alone
-constexpr int64_t kHuntSight = 700 * kU, kHuntTicks = 450, kRestTicks = 180, kHuntSpeed = 88;
+constexpr int64_t kHuntSight = 700 * kU, kHuntTicks = 450, kRestTicks = 180, kHuntSpeed = 85;
 // A full stomach slows you: by stomach/mass * kFullSlow %, at most kFullSlowMax %.
 constexpr int64_t kFullSlow = 90, kFullSlowMax = 45;
 // A boost: kBoostTicks at kBoostSpeed % of your speed, then kBoostRest before the next; it burns
@@ -89,7 +92,8 @@ public:
     std::vector<Bot> bots;
     std::vector<Pellet> pellets;
     std::vector<Queued> queue;      // the stomach's whole chunks, in order: chunk = chunks + i
-    std::vector<Queued> digested;   // what each digested chunk was queued as, in chunk order
+    std::vector<Queued> digested;   // this life's digested chunks, as queued, in chunk order (the claim's proofs)
+    std::vector<Queued> allDigested;   // every digestion of the game, in record order (the record's check)
     bool over = false, won = false;
     std::string why;
 

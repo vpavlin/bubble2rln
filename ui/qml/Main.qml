@@ -311,7 +311,7 @@ Item {
             Rectangle { Layout.fillWidth: true; height: 6; radius: 3; color: root.cRaised
                 Rectangle { height: parent.height; radius: 3; color: root.cOk; width: hud.proofs ? parent.width * Math.min(1, hud.proofs.found / hud.proofs.need) : 0 } }
             Text { color: root.cFaint; font.pixelSize: 12
-                text: root.fr ? ((root.fr.me.shield && root.fr.me.deaths > 0 ? "Eaten! Your digested size is safe.  ·  " : "")
+                text: root.fr ? ((root.fr.me.shield && root.fr.me.deaths > 0 ? "Eaten! You lost your stomach and half of your size.  ·  " : "")
                     + Math.floor(root.fr.seconds / 60) + ":" + ("0" + Math.floor(root.fr.seconds) % 60).slice(-2)
                     + (root.fps > 0 ? "  ·  " + root.fps + " frames/s" : "")
                     + (root._rttMs > 0 ? "  ·  call " + Math.round(root._rttMs) + " ms  ·  draw " + Math.round(root._paintMs) + " ms" : "")) : "" }
@@ -343,9 +343,9 @@ Item {
                     Layout.fillWidth: true; color: root.cSub; font.pixelSize: 14; wrapMode: Text.Wrap; textFormat: Text.StyledText
                     visible: root.screen === "start" || root.screen === "starting"
                     text: "Grow from a small bubble to the goal size. Eat the dots and anything at least 10% smaller than you; "
-                        + "keep away from bubbles with a <font color='" + root.cBad + "'>red ring</font>. If one eats you, you lose only what you have not digested yet.<br><br>"
+                        + "keep away from bubbles with a <font color='" + root.cBad + "'>red ring</font>. If one eats you, you lose what you haven't digested yet and <b>half of your size</b>.<br><br>"
                         + "Dots feed you less as you grow, and past size 200 not at all: the rest you hunt. Food you haven't swallowed whole slowly goes. "
-                        + "Once you are past 100, the big <font color='" + root.cBad + "'>double-ringed</font> hunters come after you. "
+                        + "Once you are past 120, two big <font color='" + root.cBad + "'>double-ringed</font> hunters come after you. "
                         + "A full stomach slows you down; <b>Space</b> boosts you away, but burns some of what you have eaten.<br><br>"
                         + "What you eat goes to your stomach first. Your computer <b>digests</b> it by solving small proofs of work, so you grow only as fast as it can work. "
                         + "Reach the goal and the game, with its proofs, becomes your ticket for an <b>RLN membership</b>: your right to send messages on Logos Messaging."

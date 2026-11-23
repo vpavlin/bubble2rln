@@ -50,22 +50,30 @@ int main(int argc, char** argv) {
     const int bits = argc > 1 ? atoi(argv[1]) : 6;
     // A beacon block 20 minutes old, and the game key.
     const int64_t now = 1795300000000;
-    Beacon b; b.id = 84846; randombytes_buf(b.hash, 32); b.tsMs = now - 20 * 60 * 1000;
+    Beacon b; b.id = 84846; b.tsMs = now - 20 * 60 * 1000;
     unsigned char pk[32], sk[64]; crypto_sign_keypair(pk, sk);
+    // The greedy bot doesn't win every game: pick a beacon whose game it wins (same digestion
+    // pace as below, one queued chunk a tick, so the game plays out the same).
+    for (int tries = 0; tries < 20; tries++) {
+        randombytes_buf(b.hash, 32);
+        Params q; Game t(gameSeed(b, pk), q);
+        while (!t.over) { std::vector<int64_t> ds; if (!t.queue.empty()) ds.push_back(t.chunks); t.step(decide(t), ds); }
+        if (t.won) break;
+    }
     const std::string seedHex = gameSeed(b, pk);
     unsigned char seed[32]; seedFromHex(seedHex, seed);
 
     // Play a full game with the greedy bot, digesting each queued chunk with a real proof.
     Params p; PowParams pw; pw.bits = bits;
     Game g(seedHex, p);
-    std::vector<uint32_t> nonces;
+    std::vector<uint32_t> nonces(512, 0);   // the last proof found for each chunk (a death can redo chunks)
     auto t0 = std::chrono::steady_clock::now();
     while (!g.over) {
         std::vector<int64_t> ds;
         if (!g.queue.empty()) {
             const Queued& q = g.queue.front();
             uint32_t n = 0; while (!digestOk(seed, (uint32_t)g.chunks, (uint32_t)q.tick, q.hash, n, pw.bits, pw.memKiB)) n++;
-            nonces.push_back(n); ds.push_back(g.chunks);
+            nonces[(size_t)g.chunks] = n; ds.push_back(g.chunks);
         }
         g.step(decide(g), ds);
     }
