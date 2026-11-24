@@ -558,6 +558,15 @@ static json readRln(BubbleCorePrivate* d, RlnReading& r) {
     json w = parseReply(lez.invoke("wallet_status", json::array(), &err, 10000));
     json wallet = {{"state", "unavailable"}, {"detail", err.message}};
     if (w.is_object() && w.contains("state")) wallet = {{"state", w.value("state", std::string())}, {"detail", w.value("detail", std::string())}};
+    // The wallet starts syncing only once a consumer names its network (use_network). Delivery's RLN
+    // module does that at start, but if the wallet wasn't ready to answer then, nothing asks again
+    // and it waits for ever. Name it ourselves (the same network; repeating it is a no-op), so the
+    // order Bubble and Chat start in doesn't matter.
+    if (w.is_object() && w.value("state", std::string()) == "pending" && w.value("network", std::string()).empty()) {
+        logos::CallError nerr;
+        json n = parseReply(lez.invoke("use_network", json::array({gd.network}), &nerr, 15000));
+        if (n.is_object()) wallet["network"] = n;
+    }
     const int64_t now = nowMs();
     std::string persist;
     { std::lock_guard<std::mutex> l(d->rwMu); persist = d->persistPath; }
