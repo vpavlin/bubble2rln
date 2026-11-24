@@ -12,7 +12,7 @@
 
 namespace bubble {
 
-constexpr int kSimVersion = 3;   // 3: dots feed less as you grow, hunters, hunger, speed, boost
+constexpr int kSimVersion = 4;   // 3: dots feed less as you grow, hunters, hunger, speed, boost; 4: full stomach slows at most 15 %
 constexpr int kDirs = 64;
 constexpr int kStop = 64;              // heading: stand still
 // An input is heading + kDirs1 * slower + kBoostBit: heading 0..63 or kStop, slower 0..3
@@ -40,8 +40,9 @@ constexpr int64_t kKeepPct = 50;
 constexpr int64_t kLeadTicks = 45;   // how far ahead a hunter aims
 constexpr int64_t kFleeSpeed = 80;   // a fleeing bot: % of the player's top speed (at most its own)   // hunters leave smaller players alone
 constexpr int64_t kHuntSight = 700 * kU, kHuntTicks = 450, kRestTicks = 180, kHuntSpeed = 85;
-// A full stomach slows you: by stomach/mass * kFullSlow %, at most kFullSlowMax %.
-constexpr int64_t kFullSlow = 90, kFullSlowMax = 45;
+// A full stomach slows you: by stomach/mass * kFullSlow %, at most kFullSlowMax % (rules 4: 45 → 15, so
+// a full player runs as fast as a hunter: it catches you only on a turn, a wall or a block).
+constexpr int64_t kFullSlow = 90, kFullSlowMax = 15;
 // A boost: kBoostTicks at kBoostSpeed % of your speed, then kBoostRest before the next; it burns
 // a tenth of the stomach (at least kBoostMin), whole chunks too (their proofs are lost).
 constexpr int64_t kBoostTicks = 12, kBoostSpeed = 220, kBoostRest = 75, kBoostMin = 2;
