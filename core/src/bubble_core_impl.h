@@ -56,6 +56,11 @@ public:
     // The claim's state: {"ok", "state": "" | "asking" | "granted" | "refused" | "failed", "result"}.
     std::string claimStatus(const std::string& gameId);
 
+    // What the player's Basecamp waits on before a claim can land, read in the background (cheap to poll):
+    // {"ok", "wallet": {"state": checking|unavailable|pending|ready|failed, "detail", "synced"?, "head"?,
+    // "percent"?, "blocksPerSecond"?, "etaSeconds"?}, "membership": {"state"?, "leaf"?}, "text"}.
+    std::string rlnStatus();
+
     // The allocator's auth vector "bubble-play" (claim.h), the gifter's side: check a claim.
     // requestJson: {"auth_type", "payload_hex", "domain", "action_hex", "config"?, "peer_id"?}
     // -> {"ok", "reason"?, "nullifier"?, "identity"?, "scheme"?} or {"error"}.

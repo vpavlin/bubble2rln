@@ -17,6 +17,8 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -273,6 +275,13 @@ struct BubbleCorePrivate {
     std::unique_ptr<logos::LpClient> libp2p;      // libp2p_module, by name
     std::unique_ptr<logos::LpClient> rln;         // rln_module, by name (the player's own RLN identity)
     std::vector<std::thread> claimThreads;
+    // rlnStatus: a watcher thread that reads the player's RLN wallet and membership while someone asks.
+    std::mutex rwMu;
+    json rwLast;                       // the last reading, served as is
+    int64_t rwAskedMs = 0;             // the watcher reads while this is under a minute old
+    std::thread rwThread;
+    std::atomic<bool> rwStop{false};
+    std::string persistPath;           // this module's own data dir: the wallet lives in a sibling's
 };
 
 BubbleCoreImpl::BubbleCoreImpl() : d(new BubbleCorePrivate) {
@@ -283,6 +292,8 @@ BubbleCoreImpl::BubbleCoreImpl() : d(new BubbleCorePrivate) {
 
 BubbleCoreImpl::~BubbleCoreImpl() {
     if (d->live) d->live->shutdown();
+    d->rwStop = true;
+    if (d->rwThread.joinable()) d->rwThread.join();
     for (auto& t : d->claimThreads) if (t.joinable()) t.join();
     delete d;
 }
@@ -497,6 +508,144 @@ std::string BubbleCoreImpl::produce_auth(const std::string& requestJson) {
 }
 
 // The RLN module that holds Delivery's keystore: liblogos_rln_module (BUBBLE_RLN_MODULE overrides).
+// ── What the player's Basecamp waits on before a claim can land: liblogos_lez_rln_module's wallet
+// syncing the LEZ testnet (a first start reads every block, ~15 min), then the membership itself.
+// The wallet saves its last synced block to wallet-home/storage.json after every block, in the
+// module's data dir next to ours (<data>/<module>/<instance>/), so the progress is a file read.
+namespace {
+
+int64_t walletSyncedBlock(const std::string& ourPersistPath) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (ourPersistPath.empty()) return -1;
+    const fs::path dir = fs::path(ourPersistPath).parent_path().parent_path() / "liblogos_lez_rln_module";
+    fs::path best;
+    fs::file_time_type bestT{};
+    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        const fs::path f = it->path() / "wallet-home" / "storage.json";
+        auto t = fs::last_write_time(f, ec);
+        if (ec) { ec.clear(); continue; }
+        if (best.empty() || t > bestT) { best = f; bestT = t; }
+    }
+    if (best.empty()) return -1;
+    std::ifstream in(best);
+    json j = json::parse(in, nullptr, false);   // read while the wallet rewrites it: a torn read is just skipped
+    if (!j.is_object() || !j.contains("last_synced_block") || !j["last_synced_block"].is_number_integer()) return -1;
+    return j["last_synced_block"].get<int64_t>();
+}
+
+std::string minutesText(int64_t sec) {
+    if (sec < 30) return "a few seconds";
+    if (sec < 90) return "about a minute";
+    return "about " + std::to_string((sec + 30) / 60) + " min";
+}
+
+}  // namespace
+
+// One reading: the wallet, its sync progress and (once it is ready) the membership.
+static std::string rlnModuleName();
+
+struct RlnReading {
+    std::deque<std::pair<int64_t, int64_t>> samples;   // (ms, synced block): the sync rate
+    int64_t head = -1, headAtMs = 0, memAtMs = 0;
+    json membership;
+};
+
+static json readRln(BubbleCorePrivate* d, RlnReading& r) {
+    const GifterDefaults gd = gifterDefaults();
+    logos::LpClient lez("liblogos_lez_rln_module", "bubble_core");
+    logos::CallError err;
+    json w = parseReply(lez.invoke("wallet_status", json::array(), &err, 10000));
+    json wallet = {{"state", "unavailable"}, {"detail", err.message}};
+    if (w.is_object() && w.contains("state")) wallet = {{"state", w.value("state", std::string())}, {"detail", w.value("detail", std::string())}};
+    const int64_t now = nowMs();
+    std::string persist;
+    { std::lock_guard<std::mutex> l(d->rwMu); persist = d->persistPath; }
+    int64_t synced = walletSyncedBlock(persist);
+    // A torn read (the wallet rewrites the file after every block) keeps the last good number.
+    if (synced < 0 && !r.samples.empty() && now - r.samples.back().first < 30000) synced = r.samples.back().second;
+    if (wallet["state"] != "unavailable" && (r.head < 0 || now - r.headAtMs > 30000)) {
+        logos::CallError ferr;
+        json f = parseReply(lez.invoke("get_fee_state", json::array(), &ferr, 15000));
+        if (f.is_object() && f.contains("height") && f["height"].is_number_integer()) { r.head = f["height"].get<int64_t>(); r.headAtMs = now; }
+    }
+    if (synced >= 0) {
+        wallet["synced"] = synced;
+        if (r.samples.empty() || r.samples.back().second != synced || now - r.samples.back().first > 5000) r.samples.push_back({now, synced});
+        while (r.samples.size() > 2 && now - r.samples.front().first > 90000) r.samples.pop_front();
+    }
+    const int64_t head = std::max<int64_t>(r.head, synced);
+    if (head > 0) wallet["head"] = head;
+    const bool ready = wallet["state"] == "ready";
+    if (!ready && synced >= 0 && head > 0 && r.samples.size() >= 2) {
+        const auto& a = r.samples.front();
+        const auto& b = r.samples.back();
+        if (b.first > a.first && b.second > a.second) {
+            const double perSec = double(b.second - a.second) * 1000.0 / double(b.first - a.first);
+            wallet["blocksPerSecond"] = std::round(perSec * 10) / 10;
+            wallet["etaSeconds"] = int64_t(double(head - synced) / perSec);
+        }
+    }
+    // The membership, once the wallet can read the registry (get_membership_state reads the chain).
+    if (ready && (r.memAtMs == 0 || now - r.memAtMs > 15000)) {
+        r.memAtMs = now;
+        const std::string configHex = b58ToHex32(gd.registry);
+        if (!configHex.empty()) {
+            logos::LpClient rln(rlnModuleName(), "bubble_core");
+            logos::CallError merr;
+            json st = parseReply(rln.invoke("get_membership_state",
+                json::array({"logos:" + gd.network + ":" + configHex, std::string(kDeliveryRlnIdentifier)}), &merr, 30000));
+            if (st.is_object() && st.contains("state")) {
+                r.membership = {{"state", st.value("state", std::string())}};
+                if (st.contains("leaf_index") && !st["leaf_index"].is_null()) r.membership["leaf"] = st["leaf_index"];
+            } else if (st.is_object() && st.contains("error") && st["error"].is_object()) {
+                r.membership = {{"state", "error"}, {"detail", st["error"].value("kind", std::string())}};
+            }
+        }
+    }
+    // In words, for the view.
+    std::string text;
+    const std::string state = wallet["state"];
+    if (state == "unavailable") text = "Basecamp's RLN wallet isn't running. Install and open Chat (Logos Messaging) first: your membership goes to its node.";
+    else if (state == "failed") text = "Basecamp's RLN wallet failed to start: " + wallet.value("detail", std::string());
+    else if (state == "pending" && synced >= 0 && head > 0) {
+        const int pct = int(std::min<int64_t>(100, synced * 100 / head));
+        text = "Your RLN wallet is syncing the LEZ testnet: block " + std::to_string(synced) + " of " + std::to_string(head)
+             + " (" + std::to_string(pct) + " %)" + (wallet.contains("etaSeconds") ? ", " + minutesText(wallet["etaSeconds"].get<int64_t>()) + " left." : ".")
+             + " A claim waits for it.";
+        wallet["percent"] = pct;
+    }
+    else if (state == "pending") text = "Your RLN wallet is starting (" + wallet.value("detail", std::string("opening the wallet")) + "). A first start syncs the LEZ testnet, about 15 minutes.";
+    else if (r.membership.is_object() && r.membership.value("state", std::string()) == "active")
+        text = "Your Basecamp has RLN membership #" + (r.membership.contains("leaf") ? r.membership["leaf"].dump() : std::string("?")) + ": Chat can send.";
+    else if (r.membership.is_object() && r.membership.value("state", std::string()) == "pending")
+        text = "Your RLN wallet is synced. Your membership is registered and waiting for the chain to confirm it.";
+    else text = "Your RLN wallet is synced: a claim goes straight to the gifter.";
+    return {{"ok", true}, {"wallet", wallet}, {"membership", r.membership.is_null() ? json::object() : r.membership}, {"text", text}};
+}
+
+static void ensureRlnWatch(BubbleCorePrivate* d) {
+    std::lock_guard<std::mutex> l(d->rwMu);
+    d->rwAskedMs = nowMs();
+    if (d->rwThread.joinable()) return;
+    d->rwThread = std::thread([d] {
+        RlnReading r;
+        while (!d->rwStop) {
+            int64_t asked;
+            { std::lock_guard<std::mutex> l(d->rwMu); asked = d->rwAskedMs; }
+            if (nowMs() - asked > 60000) { std::this_thread::sleep_for(std::chrono::milliseconds(250)); continue; }
+            json j = readRln(d, r);
+            { std::lock_guard<std::mutex> l(d->rwMu); d->rwLast = j; }
+            for (int i = 0; i < 12 && !d->rwStop; i++) std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+    });
+}
+
+static json lastRln(BubbleCorePrivate* d) {
+    std::lock_guard<std::mutex> l(d->rwMu);
+    return d->rwLast;
+}
+
 static std::string rlnModuleName() {
     const char* e = std::getenv("BUBBLE_RLN_MODULE");
     return e && *e ? e : "liblogos_rln_module";
@@ -540,7 +689,7 @@ static std::string claimWithRln(BubbleCorePrivate* d, const std::shared_ptr<Live
     const int64_t rate = o.value("rate", 100);
     const std::string meName = me, gameIdC = g->id, audienceC = o.value("audience", std::string());
     const std::string peerC = o.value("allocatorPeerId", gd.peer), addrC = o.value("allocatorMultiaddr", gd.addr);
-    d->claimThreads.emplace_back([weak, rln, p2p, registryId, rlnId, opts, reqConfig, rate, meName, gameIdC, audienceC, peerC, addrC] {
+    d->claimThreads.emplace_back([d, weak, rln, p2p, registryId, rlnId, opts, reqConfig, rate, meName, gameIdC, audienceC, peerC, addrC] {
         auto finish = [&](const std::string& state, json result, const std::string& message) {
             if (auto g = weak.lock()) {
                 std::lock_guard<std::mutex> l(g->m);
@@ -553,17 +702,40 @@ static std::string claimWithRln(BubbleCorePrivate* d, const std::shared_ptr<Live
         };
         logos::CallError err;
         p2p->invoke("start", json::array(), &err, 20000);
+        auto stage = [&](const std::string& st) {
+            if (auto g = weak.lock()) { std::lock_guard<std::mutex> l(g->m); g->claimResult["stage"] = st; }
+        };
         // The registry is read through liblogos_lez_rln_module's wallet: a fresh one syncs the
-        // testnet first (~10 min on a first start), and until then every registry read stalls.
+        // testnet first (~15 min on a first start), and until then every registry read stalls.
+        // So the claim waits for it (rlnStatus says how far it is), for up to an hour.
         {
             logos::LpClient lez("liblogos_lez_rln_module", "bubble_core");
-            logos::CallError werr;
-            json w = parseReply(lez.invoke("wallet_status", json::array(), &werr, 20000));
-            if (w.is_object() && w.contains("ready") && !w.value("ready", false)) {
-                finish("failed", json::object(), "Your Basecamp's RLN wallet is still syncing with the LEZ testnet (a first start takes about 10 minutes). Try again in a few minutes.");
-                return;
+            int silent = 0;
+            for (int i = 0;; i++) {
+                if (weak.expired() || d->rwStop) return;
+                logos::CallError werr;
+                json w = parseReply(lez.invoke("wallet_status", json::array(), &werr, 20000));
+                if (!w.is_object() && ++silent < 3) { std::this_thread::sleep_for(std::chrono::seconds(3)); continue; }
+                if (!w.is_object()) {
+                    finish("failed", json::object(), "Basecamp's RLN wallet isn't running. Install and open Chat (Logos Messaging) first, then claim again.");
+                    return;
+                }
+                silent = 0;
+                if (w.value("ready", false)) break;
+                if (w.value("state", std::string()) == "failed") {
+                    finish("failed", w, "Basecamp's RLN wallet failed to start: " + w.value("detail", std::string()));
+                    return;
+                }
+                if (i >= 1200) {
+                    finish("failed", w, "Your RLN wallet still hasn't synced after an hour. Try again later.");
+                    return;
+                }
+                stage("wallet");
+                ensureRlnWatch(d);
+                std::this_thread::sleep_for(std::chrono::seconds(3));
             }
         }
+        stage("gifter");
         // A fresh keystore unlocks itself (rln_module's auto-unlock); a user-password one must be unlocked by its owner.
         json u = parseReply(rln->invoke("unlock_keystore_auto", json::array(), &err, 30000));
 
@@ -621,6 +793,7 @@ static std::string claimWithRln(BubbleCorePrivate* d, const std::shared_ptr<Live
                 return;
             }
         }
+        stage("chain");
         // Poll the membership until the gifter's registration shows on chain (or fails).
         // Testnet blocks are slow: a registration can show up minutes after the gifter sent it, and
         // a record marked failed heals to active on the read after it lands, so only a refusal ends this.
@@ -721,6 +894,17 @@ std::string BubbleCoreImpl::claim(const std::string& gameId, const std::string& 
         if (!msg.empty()) g->claimResult["message"] = msg;
     }, 240000);
     return json{{"ok", true}, {"state", "asking"}}.dump();
+}
+
+std::string BubbleCoreImpl::rlnStatus() {
+    {
+        std::lock_guard<std::mutex> l(d->rwMu);
+        d->persistPath = instancePersistencePath();
+    }
+    ensureRlnWatch(d);
+    json j = lastRln(d);
+    if (!j.is_object()) return json{{"ok", true}, {"wallet", {{"state", "checking"}}}, {"membership", json::object()}, {"text", "Checking Basecamp's RLN wallet…"}}.dump();
+    return j.dump();
 }
 
 std::string BubbleCoreImpl::claimStatus(const std::string& gameId) {
