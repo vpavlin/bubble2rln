@@ -96,6 +96,17 @@ Item {
     }
     Timer { interval: 2000; repeat: true; running: root.screen === "won" && root.claim.state === "asking" && root.activeNow; onTriggered: root.pollClaim() }
 
+    // What the player's Basecamp waits on before a claim can land (the RLN wallet's sync, the membership).
+    property var rln: ({})
+    function pollRln() {
+        callVia("rlnStatus", [], function (raw) {
+            const r = root.parse(raw)
+            if (r && r.ok) root.rln = r
+        })
+    }
+    Timer { interval: 3000; repeat: true; triggeredOnStart: true; onTriggered: root.pollRln()
+        running: (root.screen === "start" || root.screen === "won") && root.activeNow }
+
     function giveUp() {
         if (!root.info || root.screen !== "play") return
         callVia("abandon", [root.info.gameId], null)
@@ -371,10 +382,23 @@ Item {
                     color: c.state === "granted" ? root.cOk : (c.state === "refused" || c.state === "failed") ? root.cBad : root.cSub
                     text: !root.claimable ? "This was a practice game (no LEZ block to seed it from), so it can't be claimed."
                         : c.state === "" ? "Claim your <b>RLN membership</b>: the gifter checks your proofs of work and registers you, 100 messages every 10 minutes."
-                        : c.state === "asking" ? "Asking the gifter… it checks your proofs, then registers your node's RLN identity on the LEZ testnet. Testnet blocks are slow: this can take 5–15 minutes, and you can keep playing meanwhile."
+                        : c.state === "asking" && res.stage === "wallet" ? "Your claim is waiting for your RLN wallet to finish syncing (below). Then it goes to the gifter by itself."
+                        : c.state === "asking" && res.stage === "chain" ? "The gifter has your registration. Waiting for the LEZ testnet to confirm it and your node to see it: testnet blocks are slow, this can take several minutes. Keep this screen open."
+                        : c.state === "asking" ? "Asking the gifter… it checks your proofs, then registers your node's RLN identity on the LEZ testnet. Keep this screen open: a new game stops the claim."
                         : c.state === "granted" ? ("Membership <b>#" + res.leaf_index + "</b> registered" + (res.tx_hash ? " (tx " + String(res.tx_hash).slice(0, 12) + "…)" : "")
                             + (res.demoIdentity ? ".<br>Demo identity: it is real on the registry, but this build has no RLN key of yours to send with." : ".<br>It belongs to your Basecamp's messaging node, which sends with it from now on: open Chat and say hello."))
                         : (res.message || res.error || "The claim failed.")
+                }
+                // The RLN wallet: what a claim waits on (shown until the membership is in place).
+                ColumnLayout {
+                    Layout.fillWidth: true; spacing: 6
+                    readonly property var w: root.rln.wallet || ({})
+                    visible: (root.screen === "start" || (root.screen === "won" && root.claimable && root.claim.state !== "granted")) && !!root.rln.text
+                    Text { Layout.fillWidth: true; font.pixelSize: 13; wrapMode: Text.Wrap
+                        color: parent.w.state === "ready" ? root.cOk : (parent.w.state === "failed" || parent.w.state === "unavailable") ? root.cBad : root.cSub
+                        text: root.rln.text || "" }
+                    Rectangle { Layout.fillWidth: true; height: 6; radius: 3; color: root.cRaised; visible: parent.w.percent !== undefined && parent.w.state === "pending"
+                        Rectangle { height: parent.height; radius: 3; color: root.cAccent; width: parent.width * Math.min(1, (parent.parent.w.percent || 0) / 100) } }
                 }
                 Text {
                     Layout.fillWidth: true; color: root.screen === "over" ? root.cSub : root.cBad; font.pixelSize: 14; wrapMode: Text.Wrap
