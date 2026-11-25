@@ -548,6 +548,7 @@ static std::string rlnModuleName();
 struct RlnReading {
     std::deque<std::pair<int64_t, int64_t>> samples;   // (ms, synced block): the sync rate
     int64_t head = -1, headAtMs = 0, memAtMs = 0;
+    int64_t lastSynced = -1, movedAtMs = 0;   // when the synced block last changed
     json membership;
 };
 
@@ -619,9 +620,21 @@ static json readRln(BubbleCorePrivate* d, RlnReading& r) {
     else if (state == "failed") text = "Basecamp's RLN wallet failed to start: " + wallet.value("detail", std::string());
     else if (state == "pending" && synced >= 0 && head > 0) {
         const int pct = int(std::min<int64_t>(100, synced * 100 / head));
-        text = "Your RLN wallet is syncing the LEZ testnet: block " + std::to_string(synced) + " of " + std::to_string(head)
-             + " (" + std::to_string(pct) + " %)" + (wallet.contains("etaSeconds") ? ", " + minutesText(wallet["etaSeconds"].get<int64_t>()) + " left." : ".")
-             + " A claim waits for it.";
+        if (synced != r.lastSynced) { r.lastSynced = synced; r.movedAtMs = now; }
+        const int64_t stillFor = (now - r.movedAtMs) / 1000;
+        // The file on disk can say "all blocks" while the wallet module still isn't ready (it keeps
+        // retrying to open the wallet, e.g. when it can't reach the sequencer): then the module's own
+        // reason is what the player is waiting on, not a progress bar.
+        const std::string detail = wallet.value("detail", std::string());
+        if ((pct >= 100 || stillFor >= 90) && !detail.empty()) {
+            text = "Your RLN wallet has the LEZ testnet up to block " + std::to_string(synced) + ", but it isn't ready yet: "
+                 + detail + "." + (stillFor >= 180 ? " If this doesn't change in a few minutes, restart Basecamp." : "") + " A claim waits for it.";
+            wallet["stuckSeconds"] = stillFor;
+        } else {
+            text = "Your RLN wallet is syncing the LEZ testnet: block " + std::to_string(synced) + " of " + std::to_string(head)
+                 + " (" + std::to_string(pct) + " %)" + (wallet.contains("etaSeconds") ? ", " + minutesText(wallet["etaSeconds"].get<int64_t>()) + " left." : ".")
+                 + " A claim waits for it.";
+        }
         wallet["percent"] = pct;
     }
     else if (state == "pending") text = "Your RLN wallet is starting (" + wallet.value("detail", std::string("opening the wallet")) + "). A first start syncs the LEZ testnet, about 15 minutes.";
