@@ -67,6 +67,12 @@ Item {
     // Endless mode (after a claim): no goal, the game ends when you are eaten (or Esc), and the score
     // can be posted to the leaderboard on Logos Delivery.
     property bool endless: false
+    property bool paused: false     // P: the view stops asking for frames, so the core stops the clock and the digestion
+    function togglePause() {
+        if (root.screen !== "play") return
+        root.paused = !root.paused
+        if (!root.paused) { root._buf = []; root._clock = 0; root._arriveMs = 0 }   // pick the picture up afresh
+    }
     property var scores: ({})                                // leaderboard()'s reply
     property var posted: ({ state: "", result: null })        // publishScore: "" | posting | done | failed
     readonly property bool canEndless: !!(root.rln.membership && root.rln.membership.state === "active")
@@ -74,7 +80,7 @@ Item {
 
     function startGame(endless) {
         root.screen = "starting"; root.message = ""; root.fr = null; root.claim = { state: "", result: null }
-        root.endless = !!endless; root.posted = { state: "", result: null }
+        root.endless = !!endless; root.posted = { state: "", result: null }; root.paused = false
         root._buf = []; root._clock = 0; root._arriveMs = 0; root.boostKey = false
         callVia("newGame", [root.endless ? "{\"mode\":\"endless\"}" : "{}"], function (raw) {
             var r = root.parse(raw)
@@ -192,9 +198,9 @@ Item {
         })
     }
 
-    Timer { interval: 33; repeat: true; running: root.playing && root.activeNow; onTriggered: root.pump() }
+    Timer { interval: 33; repeat: true; running: root.playing && root.activeNow && !root.paused; onTriggered: root.pump() }
     // Redraws between frames so the camera glide is smooth; only while a game is on.
-    Timer { interval: 16; repeat: true; running: root.playing && root.activeNow && root.fr !== null; onTriggered: board.requestPaint() }
+    Timer { interval: 16; repeat: true; running: root.playing && root.activeNow && root.fr !== null && !root.paused; onTriggered: board.requestPaint() }
     readonly property real tickMs: 1000 / 30
     property var _buf: []           // recent frames, oldest first
     property real _clock: 0         // local time of tick 0, as the replies show it (the earliest)
@@ -213,7 +219,8 @@ Item {
     property int fps: 0             // frames from the core per second, as this view gets them
 
     Keys.onPressed: function (e) {
-        if (e.key === Qt.Key_Escape) { root.giveUp(); return }
+        if (e.key === Qt.Key_Escape) { if (root.paused) root.togglePause(); root.giveUp(); return }
+        if (e.key === Qt.Key_P) { root.togglePause(); e.accepted = true; return }
         if (e.key === Qt.Key_Space) { root.boostKey = true; e.accepted = true; return }
         root.setKey(e.key, true)
     }
@@ -357,7 +364,22 @@ Item {
         visible: root.screen === "play"
         anchors { right: parent.right; top: parent.top; margins: 16 }
         color: root.cFaint; font.pixelSize: 12
-        text: "Steer with the mouse (further = faster) or the arrow keys · Space boosts · Esc " + (root.endless ? "ends the game (your score counts)" : "gives up")
+        text: "Steer with the mouse (further = faster) or the arrow keys · Space boosts · Esc " + (root.endless ? "ends the game (your score counts)" : "gives up") + " · P pauses"
+    }
+
+    // Paused: the clock and the digestion stand still until P.
+    Rectangle {
+        visible: root.paused && root.screen === "play"
+        anchors.fill: parent
+        color: "#a0101014"
+        Column {
+            anchors.centerIn: parent
+            spacing: 8
+            Text { anchors.horizontalCenter: parent.horizontalCenter; color: root.cText; font.pixelSize: 30; font.bold: true; text: "Paused" }
+            Text { anchors.horizontalCenter: parent.horizontalCenter; color: root.cSub; font.pixelSize: 14
+                text: "The clock and your digestion wait too. Press P to go on." }
+        }
+        MouseArea { anchors.fill: parent; onClicked: root.togglePause() }
     }
 
     // ── cards: start, checking, won, over
@@ -448,7 +470,15 @@ Item {
                     Text { Layout.fillWidth: true; font.pixelSize: 13; wrapMode: Text.Wrap
                         color: parent.w.state === "ready" ? root.cOk : (parent.w.state === "failed" || parent.w.state === "unavailable") ? root.cBad : root.cSub
                         text: root.rln.text || "" }
-                    Rectangle { Layout.fillWidth: true; height: 6; radius: 3; color: root.cRaised; visible: parent.w.percent !== undefined && parent.w.state === "pending"
+                    LogosButton {
+                        visible: !!parent.w.staleSequencer
+                        text: "Reset RLN wallet"
+                        onClicked: callVia("rlnResetWallet", [], function (raw) {
+                            const r = root.parse(raw)
+                            root.message = r && r.ok ? r.text : ("Couldn't reset the wallet: " + ((r && r.error) || "no answer"))
+                        })
+                    }
+                    Rectangle { Layout.fillWidth: true; height: 6; radius: 3; color: root.cRaised; visible: parent.w.percent !== undefined && parent.w.state === "pending" && !parent.w.staleSequencer
                         Rectangle { height: parent.height; radius: 3; color: root.cAccent; width: parent.width * Math.min(1, (parent.parent.w.percent || 0) / 100) } }
                 }
                 Text {

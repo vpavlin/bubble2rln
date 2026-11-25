@@ -73,6 +73,11 @@ public:
     // "percent"?, "blocksPerSecond"?, "etaSeconds"?}, "membership": {"state"?, "leaf"?}, "text"}.
     std::string rlnStatus();
 
+    // When rlnStatus reports wallet.staleSequencer (a wallet made for an old testnet server, which
+    // never opens): moves that wallet's home aside so the wallet module makes a fresh one on the next
+    // Basecamp start. The RLN membership (in the keystore) is untouched. -> {"ok", "movedTo", "text"}
+    std::string rlnResetWallet();
+
     // The allocator's auth vector "bubble-play" (claim.h), the gifter's side: check a claim.
     // requestJson: {"auth_type", "payload_hex", "domain", "action_hex", "config"?, "peer_id"?}
     // -> {"ok", "reason"?, "nullifier"?, "identity"?, "scheme"?} or {"error"}.

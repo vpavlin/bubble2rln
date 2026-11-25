@@ -176,7 +176,9 @@ struct Live {
         while (!stop) {
             Job* j = nullptr;
             for (auto& x : jobs) if (!x.done) { j = &x; break; }
-            if (!j) { cv.wait_for(l, std::chrono::milliseconds(200)); continue; }
+            // Digestion runs only while the game does: a paused game (no frames) doesn't digest,
+            // or pausing would grow you without the clock moving.
+            if (!j || nowMs() - lastFrameMs > pauseAfterMs()) { cv.wait_for(l, std::chrono::milliseconds(100)); continue; }
             const int64_t chunk = j->chunk;
             const Queued q = j->q;
             const uint32_t n = j->next++;
@@ -583,6 +585,40 @@ int64_t walletSyncedBlock(const std::string& ourPersistPath) {
     return j["last_synced_block"].get<int64_t>();
 }
 
+// The wallet module's home (the newest instance's), and whether it is still bound to an old testnet
+// sequencer: a home made under an earlier "testnet" entry keeps that entry's address after the
+// network table moves testnet elsewhere, and the wallet then never opens (logos-rln-lez-module#1).
+std::filesystem::path walletHome(const std::string& ourPersistPath) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (ourPersistPath.empty()) return {};
+    const fs::path dir = fs::path(ourPersistPath).parent_path().parent_path() / "liblogos_lez_rln_module";
+    fs::path best;
+    fs::file_time_type bestT{};
+    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        const fs::path h = it->path() / "wallet-home";
+        auto t = fs::last_write_time(h / "wallet_config.json", ec);
+        if (ec) { ec.clear(); continue; }
+        if (best.empty() || t > bestT) { best = h; bestT = t; }
+    }
+    return best;
+}
+
+constexpr const char* kTestnetSequencerHost = "testnet.lez.logos.co";
+
+std::string staleSequencer(const std::filesystem::path& home) {
+    if (home.empty()) return "";
+    std::ifstream nin(home / "network.json"), cin(home / "wallet_config.json");
+    const json net = json::parse(nin, nullptr, false), cfg = json::parse(cin, nullptr, false);
+    // Only a home the module bound from its own network table (not one an operator configured).
+    if (!net.is_object() || net.value("network", std::string()) != "testnet" || net.value("source", std::string()) != "table") return "";
+    if (!cfg.is_object()) return "";
+    std::string addr = cfg.value("sequencer_addr", std::string());
+    if (addr.empty() && cfg.contains("sequencer") && cfg["sequencer"].is_object()) addr = cfg["sequencer"].value("sequencer_addr", std::string());
+    if (addr.empty() || addr.find(kTestnetSequencerHost) != std::string::npos) return "";
+    return addr;
+}
+
 std::string minutesText(int64_t sec) {
     if (sec < 30) return "a few seconds";
     if (sec < 90) return "about a minute";
@@ -665,7 +701,13 @@ static json readRln(BubbleCorePrivate* d, RlnReading& r) {
     // In words, for the view.
     std::string text;
     const std::string state = wallet["state"];
-    if (state == "unavailable") text = "Basecamp's RLN wallet isn't running. Install and open Chat (Logos Messaging) first: your membership goes to its node.";
+    // Even a "ready" wallet is no use on an old server: its chain reads go there.
+    const std::string stale = staleSequencer(walletHome(persist));
+    if (!stale.empty()) {
+        wallet["staleSequencer"] = stale;
+        text = "Your RLN wallet is still set up for an old LEZ testnet server (" + stale + "), so it can't open. "
+               "Reset it with the button below and restart Basecamp; your membership isn't affected.";
+    } else if (state == "unavailable") text = "Basecamp's RLN wallet module isn't answering yet. If this stays, restart Basecamp.";
     else if (state == "failed") text = "Basecamp's RLN wallet failed to start: " + wallet.value("detail", std::string());
     else if (state == "pending" && synced >= 0 && head > 0) {
         const int pct = int(std::min<int64_t>(100, synced * 100 / head));
@@ -1205,6 +1247,19 @@ std::string BubbleCoreImpl::rlnStatus() {
     json j = lastRln(d);
     if (!j.is_object()) return json{{"ok", true}, {"wallet", {{"state", "checking"}}}, {"membership", json::object()}, {"text", "Checking Basecamp's RLN wallet…"}}.dump();
     return j.dump();
+}
+
+std::string BubbleCoreImpl::rlnResetWallet() {
+    // Only a wallet stuck on an old testnet sequencer: its home is moved aside (kept, renamed), and
+    // the wallet module makes a fresh one for the current testnet on its next start.
+    const auto home = walletHome(instancePersistencePath());
+    const std::string stale = staleSequencer(home);
+    if (stale.empty()) return json{{"ok", false}, {"error", "the RLN wallet isn't bound to an old testnet server; nothing to reset"}}.dump();
+    std::error_code ec;
+    const auto aside = home.parent_path() / ("wallet-home.old-" + std::to_string(wallMs()));
+    std::filesystem::rename(home, aside, ec);
+    if (ec) return json{{"ok", false}, {"error", "couldn't move " + home.string() + ": " + ec.message()}}.dump();
+    return json{{"ok", true}, {"movedTo", aside.string()}, {"text", "Done. Restart Basecamp: the wallet then syncs the current LEZ testnet from scratch (about 15 minutes)."}}.dump();
 }
 
 std::string BubbleCoreImpl::finish(const std::string& gameId) {
