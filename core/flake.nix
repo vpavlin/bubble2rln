@@ -7,6 +7,9 @@
     # The RLN wallet (LEZ testnet reads, the sync Bubble shows). A dependency so Basecamp loads it
     # with Bubble: a module can't load another, and without Chat nothing else would. Pinned at 5.1.0.
     liblogos_lez_rln_module.url = "github:logos-co/logos-rln-modules/d9f8b3d5ff93f6fd6fb363f5689098c07e81ac47?dir=logos-lez-rln-module";
+    # The RLN keystore (the player's identity; the delegated claim goes through it). Delivery uses the
+    # same module, so the membership backs Chat too; without Chat nothing else would load it. 0.12.0.
+    liblogos_rln_module.url = "github:logos-co/logos-rln-modules/d9f8b3d5ff93f6fd6fb363f5689098c07e81ac47?dir=logos-rln-module";
   };
 
   outputs = inputs@{ logos-module-builder, ... }:

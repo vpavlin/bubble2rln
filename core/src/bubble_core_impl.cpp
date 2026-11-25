@@ -758,6 +758,13 @@ static std::string claimWithRln(BubbleCorePrivate* d, const std::shared_ptr<Live
         {
             json all = parseReply(rln->invoke("get_memberships", json::array({registryId}), &err, 30000));
             if (all.is_object() && all["memberships"].is_array()) mine = all["memberships"];
+            else if (!all.is_object()) {
+                // No answer at all: the keystore module isn't running (Bubble depends on it, so
+                // Basecamp should have loaded it; a restart of Basecamp loads it again).
+                finish("failed", json::object(), "Basecamp's RLN keystore (liblogos_rln_module) didn't answer"
+                       + (err.message.empty() ? std::string() : " (" + err.message + ")") + ". Restart Basecamp and claim again.");
+                return;
+            }
         }
         auto stateOf = [](const json& m) { return m.value("state", std::string()); };
         bool wait = false;
