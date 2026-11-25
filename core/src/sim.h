@@ -47,9 +47,14 @@ constexpr int64_t kFullSlow = 90, kFullSlowMax = 15;
 // a tenth of the stomach (at least kBoostMin), whole chunks too (their proofs are lost).
 constexpr int64_t kBoostTicks = 12, kBoostSpeed = 220, kBoostRest = 75, kBoostMin = 2;
 
+// Endless mode (after a claim): no goal; the game ends when you are eaten, give up or the clock runs
+// out (maxTicks), and the score is your size then. Same rules otherwise, so the same check replays it.
+constexpr int64_t kEndlessMax = 100000;   // the size the digestion queue is capped at (unreachable)
 struct Params {
     int64_t start = 10, goal = 300, chunk = 5, minTicks = 1800, maxTicks = 36000;
-    int64_t chunksNeeded() const { return (goal - start + chunk - 1) / chunk; }
+    bool endless = false;
+    int64_t chunksNeeded() const { return ((endless ? kEndlessMax : goal) - start + chunk - 1) / chunk; }
+    static Params endlessDefaults() { Params p; p.endless = true; p.goal = kEndlessMax; p.minTicks = 0; return p; }
     nlohmann::json toJson() const;
     static bool fromJson(const nlohmann::json& j, Params& out);
 };

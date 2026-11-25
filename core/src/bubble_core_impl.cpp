@@ -3,6 +3,7 @@
 #include "claim.h"
 #include "check.h"
 #include "pow.h"
+#include "score.h"
 #include "sim.h"
 
 #include "logos_lp_client.h"
@@ -20,6 +21,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -236,10 +238,10 @@ struct Live {
                 if (due > kTickMs * 3) due = 0;   // fell far behind: don't sprint
                 over = game->over;
                 won = game->won;
-                if (won) checkState = "running";
+                if (won || (over && params.endless)) checkState = "running";
             }
             if (!over) continue;
-            if (won) {
+            if (won || params.endless) {
                 // The same check the allocator will make, on the recorded game.
                 json recJson;
                 { std::lock_guard<std::mutex> l(m); recJson = rec.toJson(seedHex); }
@@ -266,6 +268,29 @@ struct Live {
 
 }
 
+// The endless-mode leaderboard: scores posted on Logos Delivery (score.h), each checked here by
+// replaying its game before it is listed. One background thread: it brings up (or joins) this
+// Basecamp's Delivery node, subscribes to the score topic, checks what arrives, keeps the board on
+// disk and re-posts this player's best now and then (Delivery's Store catch-up returns old posts to
+// a node that subscribes later, and the re-posts keep them there).
+struct ScoreBoard {
+    std::mutex m;
+    std::condition_variable cv;
+    std::deque<std::pair<std::string, std::vector<unsigned char>>> inbox;   // (message hash, payload)
+    std::set<std::string> seen;                 // message hashes already handled
+    std::map<std::string, json> entries;        // game id -> {score, ticks, ended, when, id, mine}
+    std::map<std::string, json> mine;           // game id -> this player's signed score message
+    std::deque<json> outbox;                    // score messages to send once Delivery is up
+    std::string status = "starting";            // starting | joining | online | error: …
+    std::string persist;
+    int64_t lastRepostMs = 0, checked = 0, refused = 0;
+    bool up = false, dirty = false;
+    std::atomic<bool> stop{false};
+    std::thread worker;
+    std::unique_ptr<logos::LpClient> delivery;
+    logos::LpSubscription sub;
+};
+
 struct BubbleCorePrivate {
     std::shared_ptr<Live> live;
     unsigned threads = 1;
@@ -282,6 +307,7 @@ struct BubbleCorePrivate {
     std::thread rwThread;
     std::atomic<bool> rwStop{false};
     std::string persistPath;           // this module's own data dir: the wallet lives in a sibling's
+    std::shared_ptr<ScoreBoard> board;   // the endless-mode leaderboard, started on first use
 };
 
 BubbleCoreImpl::BubbleCoreImpl() : d(new BubbleCorePrivate) {
@@ -292,6 +318,12 @@ BubbleCoreImpl::BubbleCoreImpl() : d(new BubbleCorePrivate) {
 
 BubbleCoreImpl::~BubbleCoreImpl() {
     if (d->live) d->live->shutdown();
+    if (d->board) {
+        { std::lock_guard<std::mutex> l(d->board->m); d->board->stop = true; }
+        d->board->cv.notify_all();
+        d->board->sub.cancel();
+        if (d->board->worker.joinable()) d->board->worker.join();
+    }
     d->rwStop = true;
     if (d->rwThread.joinable()) d->rwThread.join();
     for (auto& t : d->claimThreads) if (t.joinable()) t.join();
@@ -305,6 +337,8 @@ std::string BubbleCoreImpl::snapshot() {
     if (d->live) j["gameId"] = d->live->id;
     return j.dump();
 }
+
+static json lastRln(BubbleCorePrivate* d);
 
 std::string BubbleCoreImpl::newGame(const std::string& optionsJson) {
     json opts = json::parse(optionsJson, nullptr, false);
@@ -328,15 +362,29 @@ std::string BubbleCoreImpl::newGame(const std::string& optionsJson) {
         randombytes_buf(g->seed, 32);
         g->seedHex = hex(g->seed, 32);
     }
-    g->params = defaultParams();
-    g->pow = defaultPow();
+    const bool endless = opts.is_object() && opts.value("mode", std::string()) == "endless";
+    if (endless) {
+        // Endless games open once this Basecamp has an RLN membership: their scores are posted with it.
+        const json r = lastRln(d);
+        const bool member = r.is_object() && r.value("membership", json::object()).value("state", std::string()) == "active";
+        const char* any = std::getenv("BUBBLE_ENDLESS_ANY");
+        if (!member && !(any && *any)) {
+            g->shutdown();
+            return json{{"ok", false}, {"error", "Endless mode opens once your Basecamp has an RLN membership: win a game and claim one first."}}.dump();
+        }
+        g->params = scoreParams();
+        g->pow = scorePow();
+    } else {
+        g->params = defaultParams();
+        g->pow = defaultPow();
+    }
     g->game = std::make_unique<Game>(g->seedHex, g->params);
     g->startedMs = nowMs();
     for (unsigned i = 0; i < d->threads; i++) g->workers.emplace_back([g] { g->digest(); });
     g->loop = std::thread([g] { g->run(); });
     d->live = g;
     json beacon = g->claimable ? json{{"id", g->beacon.id}, {"hash", hex(g->beacon.hash, 32)}, {"ts", g->beacon.tsMs}} : json();
-    return json{{"ok", true}, {"gameId", g->id}, {"params", g->params.toJson()}, {"pow", g->pow.toJson()},
+    return json{{"ok", true}, {"gameId", g->id}, {"mode", endless ? "endless" : "claim"}, {"params", g->params.toJson()}, {"pow", g->pow.toJson()},
                 {"chunks", g->params.chunksNeeded()}, {"threads", d->threads}, {"claimable", g->claimable},
                 {"beacon", beacon}, {"why", g->beaconWhy}}.dump();
 }
@@ -407,6 +455,7 @@ std::string BubbleCoreImpl::frame(const std::string& gameId, int64_t dx, int64_t
                {"boost", gm.me.boost > 0 ? "on" : gm.me.boost < 0 ? "rest" : (gm.me.stomach >= kBoostMin ? "ready" : "empty")},
                {"slowedBy", std::min(kFullSlowMax, mm ? gm.me.stomach * kFullSlow / mm : 0)},
                {"speed", 4 - (g->dir % kBoostBit) / kDirs1}};   // % slowed by a full stomach; speed in quarters   // % of a dot that still feeds you
+    if (g->params.endless) { me["score"] = gm.me.body; me["endless"] = true; }
     return json{{"ok", true}, {"tick", gm.tick}, {"seconds", gm.tick / kTickHz}, {"over", gm.over}, {"won", gm.won},
                 {"why", gm.why}, {"me", me}, {"scale", scale},
                 {"world", {std::lround(cx), std::lround(cy), std::lround(kWorld * s), std::lround(100 * kU * s)}},
@@ -666,6 +715,228 @@ static void ensureRlnWatch(BubbleCorePrivate* d) {
 static json lastRln(BubbleCorePrivate* d) {
     std::lock_guard<std::mutex> l(d->rwMu);
     return d->rwLast;
+}
+
+// ── The leaderboard (see ScoreBoard)
+namespace {
+
+// Delivery hands bytes over as {"_bytes": base64} (padded or not), a byte array or a string.
+bool payloadBytes(const json& p, std::vector<unsigned char>& out) {
+    out.clear();
+    if (p.is_object() && p.contains("_bytes") && p["_bytes"].is_string()) {
+        const std::string& b = p["_bytes"].get_ref<const std::string&>();
+        for (int variant : {sodium_base64_VARIANT_ORIGINAL, sodium_base64_VARIANT_ORIGINAL_NO_PADDING,
+                            sodium_base64_VARIANT_URLSAFE, sodium_base64_VARIANT_URLSAFE_NO_PADDING}) {
+            out.assign(b.size(), 0);
+            size_t len = 0;
+            if (sodium_base642bin(out.data(), out.size(), b.c_str(), b.size(), nullptr, &len, nullptr, variant) == 0) { out.resize(len); return true; }
+        }
+        return false;
+    }
+    if (p.is_array()) {
+        for (const auto& v : p) { if (!v.is_number_integer()) return false; out.push_back((unsigned char)v.get<int>()); }
+        return true;
+    }
+    if (p.is_string()) { const std::string& t = p.get_ref<const std::string&>(); out.assign(t.begin(), t.end()); return true; }
+    return false;
+}
+
+// A Delivery reply: {"success", "value", "error"} (or a bare value). ok + the value or the error.
+bool deliveryOk(const json& r, json& value, std::string& error) {
+    json v = parseReply(r);
+    if (v.is_object() && v.contains("success")) {
+        value = v.value("value", json());
+        error = v["error"].is_string() ? v["error"].get<std::string>() : (v.value("success", false) ? "" : v.dump());
+        return v.value("success", false);
+    }
+    value = v;
+    error = v.is_null() ? "no answer" : "";
+    return !v.is_null();
+}
+
+void boardSave(ScoreBoard* b) {
+    if (b->persist.empty()) return;
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::create_directories(b->persist, ec);
+    json e = json::array(), m = json::array();
+    for (const auto& [id, v] : b->entries) e.push_back(v);
+    for (const auto& [id, v] : b->mine) m.push_back(v);
+    for (auto& [name, data] : std::vector<std::pair<std::string, json>>{{"leaderboard.json", e}, {"my-scores.json", m}}) {
+        const fs::path tmp = fs::path(b->persist) / (name + ".tmp");
+        { std::ofstream o(tmp); o << data.dump(); }
+        fs::rename(tmp, fs::path(b->persist) / name, ec);
+    }
+}
+
+void boardLoad(ScoreBoard* b) {
+    if (b->persist.empty()) return;
+    namespace fs = std::filesystem;
+    auto read = [&](const char* name) { std::ifstream in(fs::path(b->persist) / name); return json::parse(in, nullptr, false); };
+    json e = read("leaderboard.json"), m = read("my-scores.json");
+    if (e.is_array()) for (const auto& v : e) if (v.is_object() && v.contains("id")) b->entries[v["id"].get<std::string>()] = v;
+    if (m.is_array()) for (const auto& v : m) if (v.is_object() && v.contains("id")) b->mine[v["id"].get<std::string>()] = v;
+}
+
+// Keeps the board to the best 200 games.
+void boardTrim(ScoreBoard* b) {
+    while (b->entries.size() > 200) {
+        auto worst = b->entries.begin();
+        for (auto it = b->entries.begin(); it != b->entries.end(); ++it)
+            if (it->second.value("score", 0) < worst->second.value("score", 0)) worst = it;
+        if (worst->second.value("mine", false)) break;
+        b->entries.erase(worst);
+    }
+}
+
+// Brings up this Basecamp's Delivery node the way Chat does (createNode, or join the node that
+// exists; a second start on a running node is harmless), and subscribes to the scores.
+bool boardUp(ScoreBoard* b) {
+    if (!b->delivery) b->delivery = std::make_unique<logos::LpClient>("delivery_module", "bubble_core");
+    logos::CallError err;
+    json value;
+    std::string error;
+    const json cfg = {{"mode", "Core"}, {"preset", "logos.test"}, {"messagingOverrides", {{"logLevel", "ERROR"}}}};
+    if (!deliveryOk(b->delivery->invoke("createNode", json::array({cfg.dump()}), &err, 30000), value, error)) {
+        json v2; std::string e2;
+        if (!deliveryOk(b->delivery->invoke("getNodeInfo", json::array({"Version"}), &err, 15000), v2, e2)) {
+            std::lock_guard<std::mutex> l(b->m);
+            b->status = "error: Logos Delivery isn't available (" + (error.empty() ? err.message : error) + ")";
+            return false;
+        }
+    }
+    deliveryOk(b->delivery->invoke("start", json::array(), &err, 30000), value, error);
+    if (!b->sub.valid()) {
+        std::weak_ptr<int> dummy;
+        ScoreBoard* bp = b;
+        b->sub = b->delivery->subscribe("messageReceived", [bp](json a) {
+            // An event callback: only queue it (no module calls from here).
+            if (!a.is_array() || a.size() < 3) return;
+            if (!a[1].is_string() || a[1].get<std::string>() != kScoreTopic) return;
+            std::vector<unsigned char> bytes;
+            if (!payloadBytes(a[2], bytes)) return;
+            const std::string hash = a[0].is_string() ? a[0].get<std::string>() : std::string();
+            {
+                std::lock_guard<std::mutex> l(bp->m);
+                if (bp->inbox.size() < 500) bp->inbox.emplace_back(hash, std::move(bytes));
+            }
+            bp->cv.notify_all();
+        });
+    }
+    if (!deliveryOk(b->delivery->invoke("subscribe", json::array({kScoreTopic}), &err, 30000), value, error)) {
+        std::lock_guard<std::mutex> l(b->m);
+        b->status = "joining";   // the node is still starting: try again shortly
+        return false;
+    }
+    std::lock_guard<std::mutex> l(b->m);
+    b->status = "online";
+    b->up = true;
+    return true;
+}
+
+bool boardSend(ScoreBoard* b, const json& msg, std::string& why) {
+    const std::string body = msg.dump();
+    logos::CallError err;
+    json value;
+    const std::vector<unsigned char> bytes(body.begin(), body.end());
+    const bool ok = deliveryOk(b->delivery->invoke("send", json::array({kScoreTopic, json{{"_bytes", toBase64(bytes)}}}), &err, 30000), value, why);
+    if (!ok && why.empty()) why = err.message;
+    return ok;
+}
+
+void boardRun(ScoreBoard* b) {
+    {
+        std::lock_guard<std::mutex> l(b->m);
+        boardLoad(b);
+    }
+    const std::string lezUrl = defaultLezUrl();
+    BeaconLookup lookup = [lezUrl](uint64_t id, Beacon& out, std::string& why, bool& unreachable) {
+        return beaconById(lezUrl, id, out, why, unreachable);
+    };
+    int64_t nextUpMs = 0;
+    while (!b->stop) {
+        bool up;
+        { std::lock_guard<std::mutex> l(b->m); up = b->up; }
+        if (!up && nowMs() >= nextUpMs) {
+            if (!boardUp(b)) nextUpMs = nowMs() + 10000;
+            else {
+                // Online: send what waited, and re-post the best right away (it seeds the Store).
+                std::lock_guard<std::mutex> l(b->m);
+                b->lastRepostMs = 0;
+            }
+        }
+        std::pair<std::string, std::vector<unsigned char>> item;
+        bool have = false;
+        {
+            std::unique_lock<std::mutex> l(b->m);
+            if (b->inbox.empty()) b->cv.wait_for(l, std::chrono::seconds(5));
+            if (b->stop) break;
+            while (!b->inbox.empty()) {
+                item = std::move(b->inbox.front());
+                b->inbox.pop_front();
+                if (!item.first.empty() && !b->seen.insert(item.first).second) continue;   // a duplicate delivery
+                have = true;
+                break;
+            }
+        }
+        if (have) {
+            json msg = json::parse(item.second.begin(), item.second.end(), nullptr, false);
+            json v;
+            try { v = verifyScore(msg, lookup); } catch (const std::exception& e) { v = {{"ok", false}, {"reason", e.what()}}; }
+            std::lock_guard<std::mutex> l(b->m);
+            if (v.value("ok", false)) {
+                const std::string id = v["id"];
+                const bool isMine = b->mine.count(id) > 0;
+                json e = {{"id", id}, {"score", v["score"]}, {"ticks", v["ticks"]}, {"ended", v["ended"]}, {"when", v["when"]}, {"mine", isMine}};
+                if (!b->entries.count(id)) { b->entries[id] = e; b->dirty = true; boardTrim(b); }
+                b->checked++;
+            } else {
+                b->refused++;
+                if (v.value("retry", false) && !item.first.empty()) b->seen.erase(item.first);   // the block lookup failed: a later copy may pass
+            }
+            continue;
+        }
+        // Outbox, and the periodic re-post of this player's best (every 30 min).
+        std::deque<json> send;
+        {
+            std::lock_guard<std::mutex> l(b->m);
+            if (!b->up) continue;
+            send.swap(b->outbox);
+            if (!b->mine.empty() && nowMs() - b->lastRepostMs > 30 * 60 * 1000) {
+                const json* best = nullptr;
+                for (const auto& [id, mm] : b->mine) if (!best || mm.value("score", 0) > best->value("score", 0)) best = &mm;
+                if (best) send.push_back((*best)["msg"]);
+                b->lastRepostMs = nowMs();
+            }
+        }
+        for (const auto& m : send) {
+            std::string why;
+            if (!boardSend(b, m, why)) {
+                std::lock_guard<std::mutex> l(b->m);
+                b->status = "error: sending a score failed (" + why + ")";
+                b->outbox.push_back(m);
+                b->up = false;   // bring Delivery up again before the next try
+                nextUpMs = nowMs() + 15000;
+                break;
+            }
+        }
+        std::lock_guard<std::mutex> l(b->m);
+        if (b->dirty) { boardSave(b); b->dirty = false; }
+    }
+    std::lock_guard<std::mutex> l(b->m);
+    boardSave(b);
+}
+
+}  // namespace
+
+static std::shared_ptr<ScoreBoard> ensureBoard(BubbleCorePrivate* d, const std::string& persistRoot) {
+    if (d->board) return d->board;
+    auto b = std::make_shared<ScoreBoard>();
+    b->persist = persistRoot.empty() ? std::string() : (std::filesystem::path(persistRoot) / "scores").string();
+    ScoreBoard* bp = b.get();
+    b->worker = std::thread([bp] { boardRun(bp); });
+    d->board = b;
+    return b;
 }
 
 static std::string rlnModuleName() {
@@ -934,6 +1205,74 @@ std::string BubbleCoreImpl::rlnStatus() {
     json j = lastRln(d);
     if (!j.is_object()) return json{{"ok", true}, {"wallet", {{"state", "checking"}}}, {"membership", json::object()}, {"text", "Checking Basecamp's RLN wallet…"}}.dump();
     return j.dump();
+}
+
+std::string BubbleCoreImpl::finish(const std::string& gameId) {
+    auto g = d->live;
+    if (!g || g->id != gameId) return json{{"ok", false}, {"error", "no such game"}}.dump();
+    std::lock_guard<std::mutex> l(g->m);
+    if (!g->params.endless) return json{{"ok", false}, {"error", "only an endless game can be finished (give up a claim game instead)"}}.dump();
+    if (!g->game->over) {
+        // Ends here, as a replay of the record cut at this tick does: the score is the size now.
+        g->game->over = true;
+        g->game->why = "quit";
+        g->rec.end = g->game->tick;
+        g->jobs.clear();
+    }
+    return json{{"ok", true}}.dump();
+}
+
+std::string BubbleCoreImpl::publishScore(const std::string& gameId) {
+    auto g = d->live;
+    if (!g || g->id != gameId) return json{{"ok", false}, {"error", "no such game"}}.dump();
+    json msg, res;
+    {
+        std::lock_guard<std::mutex> l(g->m);
+        if (!g->params.endless) return json{{"ok", false}, {"error", "only endless games have scores"}}.dump();
+        if (!g->claimable) return json{{"ok", false}, {"error", "a practice game (no LEZ block to seed it from) can't be published"}}.dump();
+        if (g->checkState != "done" || !g->checkResult.value("ok", false))
+            return json{{"ok", false}, {"error", "the game isn't over and checked yet"}}.dump();
+        res = g->checkResult;
+        msg = makeScore(g->beacon, g->pk, g->sk, g->rec, res.value("score", (int64_t)0), res.value("ticks", (int64_t)0),
+                        res.value("ended", std::string()), wallMs());
+    }
+    if (msg.dump().size() > kScoreMaxBytes) return json{{"ok", false}, {"error", "this game is too long to post in one message"}}.dump();
+    // The id a receiver will compute (score.h), so this score is known as ours on the board.
+    BeaconLookup self = [g](uint64_t, Beacon& out, std::string&, bool&) { out = g->beacon; return true; };
+    json v = verifyScore(msg, self, g->pow);
+    if (!v.value("ok", false)) return json{{"ok", false}, {"error", "the score doesn't check: " + v.value("reason", std::string())}}.dump();
+    auto b = ensureBoard(d, instancePersistencePath());
+    const std::string id = v["id"];
+    {
+        std::lock_guard<std::mutex> l(b->m);
+        b->mine[id] = {{"id", id}, {"score", v["score"]}, {"msg", msg}};
+        b->entries[id] = {{"id", id}, {"score", v["score"]}, {"ticks", v["ticks"]}, {"ended", v["ended"]}, {"when", v["when"]}, {"mine", true}};
+        b->outbox.push_back(msg);
+        b->dirty = true;
+    }
+    b->cv.notify_all();
+    return json{{"ok", true}, {"id", id}, {"score", v["score"]}}.dump();
+}
+
+std::string BubbleCoreImpl::leaderboard() {
+    auto b = ensureBoard(d, instancePersistencePath());
+    std::lock_guard<std::mutex> l(b->m);
+    std::vector<json> all;
+    for (const auto& [id, e] : b->entries) all.push_back(e);
+    std::sort(all.begin(), all.end(), [](const json& a, const json& c) {
+        if (a.value("score", 0) != c.value("score", 0)) return a.value("score", 0) > c.value("score", 0);
+        return a.value("when", (int64_t)0) < c.value("when", (int64_t)0);
+    });
+    json top = json::array(), myBest;
+    int rank = 0, myRank = 0;
+    for (const auto& e : all) {
+        rank++;
+        if (rank <= 20) { json x = e; x["rank"] = rank; top.push_back(x); }
+        if (e.value("mine", false) && !myRank) { myRank = rank; myBest = e; myBest["rank"] = rank; }
+    }
+    return json{{"ok", true}, {"status", b->status}, {"entries", top}, {"count", (int64_t)all.size()},
+                {"myBest", myBest}, {"pending", (int64_t)(b->inbox.size() + b->outbox.size())},
+                {"checked", b->checked}, {"refused", b->refused}}.dump();
 }
 
 std::string BubbleCoreImpl::claimStatus(const std::string& gameId) {

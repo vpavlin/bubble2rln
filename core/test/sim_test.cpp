@@ -5,6 +5,8 @@
 #include "sim.h"
 #include "check.h"
 #include "pow.h"
+#include "score.h"
+#include <sodium.h>
 #include <sodium.h>
 #include <chrono>
 #include <cstdio>
@@ -216,6 +218,67 @@ int main(int argc, char** argv) {
         Params easier = q; easier.goal = 20;
         CHECK(!checkGame(seed, easier, pw, good).value("ok", true), "other rules accepted");
         printf("check: honest game ok, tampered nonce/move/seed/rules refused\n");
+    }
+    // (5) endless mode: no goal, the game ends when eaten (or the clock), the score is the size then.
+    {
+        Params q = Params::endlessDefaults();
+        PowParams pw; pw.bits = 4; pw.memKiB = 64;
+        std::string seed(64, 'c');
+        unsigned char sb[32]; seedFromHex(seed, sb);
+        Game g(seed, q); Record rec;
+        while (!g.over) {
+            int d = decide(g);
+            std::vector<std::pair<int64_t, uint32_t>> dig; std::vector<int64_t> ds;
+            if (!g.queue.empty()) {
+                const Queued& qd = g.queue.front();
+                uint32_t n = 0; while (!digestOk(sb, (uint32_t)g.chunks, (uint32_t)qd.tick, qd.hash, n, pw.bits, pw.memKiB)) n++;
+                dig.push_back({g.chunks, n}); ds.push_back(g.chunks);
+            }
+            rec.add(g.tick, d, dig); g.step(d, ds);
+        }
+        rec.end = g.tick;
+        json good = rec.toJson(seed);
+        json r = checkGame(seed, q, pw, good);
+        CHECK(r.value("ok", false) && r.value("score", -1) == g.me.body, "endless game refused: %s", r.dump().c_str());
+        CHECK(!checkGame(seed, Params(), pw, good).value("ok", true), "endless record accepted as a claim game");
+        json bad = good; bad["inputs"][5][1] = (bad["inputs"][5][1].get<int>() + 32) % 64;
+        json rb = checkGame(seed, q, pw, bad);
+        CHECK(!rb.value("ok", true) || rb.value("score", -1) != g.me.body, "changed move kept the score");
+        // A record cut short replays to the size at that point (giving up early is allowed).
+        // The binary record round-trips, and a signed score message verifies (and refuses tampering).
+        {
+            Record back; std::string why;
+            const auto bin = encodeRecordBin(rec);
+            CHECK(decodeRecordBin(bin, back, why) && back.toJson(seed) == good, "binary record round trip: %s", why.c_str());
+            unsigned char pk[32], sk[64]; crypto_sign_keypair(pk, sk);
+            Beacon bc; bc.id = 77; bc.tsMs = 1700000000000; memset(bc.hash, 7, 32);
+            const std::string seed2 = gameSeed(bc, pk);
+            unsigned char sb2[32]; seedFromHex(seed2, sb2);
+            Game g2(seed2, q); Record rec2;
+            while (!g2.over && g2.tick < 900) {
+                int d = decide(g2);
+                std::vector<std::pair<int64_t, uint32_t>> dig; std::vector<int64_t> ds;
+                if (!g2.queue.empty()) {
+                    const Queued& qd = g2.queue.front();
+                    uint32_t n = 0; while (!digestOk(sb2, (uint32_t)g2.chunks, (uint32_t)qd.tick, qd.hash, n, pw.bits, pw.memKiB)) n++;
+                    dig.push_back({g2.chunks, n}); ds.push_back(g2.chunks);
+                }
+                rec2.add(g2.tick, d, dig); g2.step(d, ds);
+            }
+            rec2.end = g2.tick;
+            const std::string ended = g2.over ? g2.why : "quit";
+            json msg = makeScore(bc, pk, sk, rec2, g2.me.body, g2.tick, ended, 1234);
+            BeaconLookup look = [&](uint64_t id, Beacon& out, std::string& w, bool& un) { un = false; if (id != bc.id) { w = "unknown"; return false; } out = bc; return true; };
+            json v = verifyScore(msg, look, pw);
+            CHECK(v.value("ok", false) && v.value("score", -1) == g2.me.body, "score refused: %s", v.dump().c_str());
+            json m2 = msg; m2["score"] = g2.me.body + 50;
+            CHECK(!verifyScore(m2, look, pw).value("ok", true), "inflated score accepted");
+            json m3 = msg; m3["beacon"]["hash"] = std::string(64, '8');
+            CHECK(!verifyScore(m3, look, pw).value("ok", true), "made-up block accepted");
+            printf("score message: %zu bytes for %lld s, verified; inflated score and made-up block refused\n", msg.dump().size(), (long long)(g2.tick / kTickHz));
+        }
+        printf("endless: %s after %lld s, score %lld, %zu moves, %zu digestions, record %zu bytes as JSON\n",
+               g.why.c_str(), (long long)(g.tick / kTickHz), (long long)g.me.body, rec.inputs.size(), rec.digests.size(), good.dump().size());
     }
     printf(fails ? "%d FAILED\n" : "all passed\n", fails);
     return fails ? 1 : 0;

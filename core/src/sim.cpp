@@ -85,7 +85,9 @@ uint32_t Rng::next() {
 }
 
 json Params::toJson() const {
-    return {{"start", start}, {"goal", goal}, {"chunk", chunk}, {"minTicks", minTicks}, {"maxTicks", maxTicks}};
+    json j = {{"start", start}, {"goal", goal}, {"chunk", chunk}, {"minTicks", minTicks}, {"maxTicks", maxTicks}};
+    if (endless) j["endless"] = true;
+    return j;
 }
 
 bool Params::fromJson(const json& j, Params& o) {
@@ -95,6 +97,8 @@ bool Params::fromJson(const json& j, Params& o) {
         v = j[k].get<int64_t>();
         return v >= lo && v <= hi;
     };
+    if (j.contains("endless") && !j["endless"].is_boolean()) return false;
+    o.endless = j.value("endless", false);
     return get("start", o.start, 1, 1000) && get("goal", o.goal, o.start + 1, 100000) && get("chunk", o.chunk, 1, 1000)
         && get("minTicks", o.minTicks, 0, 1000000) && get("maxTicks", o.maxTicks, 1, 1000000);
 }
@@ -273,7 +277,10 @@ std::string Game::step(int input, const std::vector<int64_t>& digests) {
         }
         Bot& ba = bots[a];
         int64_t ra = radius(ba.mass);
-        if (me.shield == 0 && eats(ba.x, ba.y, ba.mass, ra, me.x, me.y, mass())) {
+        if (!over && me.shield == 0 && p.endless && eats(ba.x, ba.y, ba.mass, ra, me.x, me.y, mass())) {
+            // Endless: being eaten ends the game; the score is the size you had.
+            over = true; why = "eaten"; deaths++;
+        } else if (me.shield == 0 && !p.endless && eats(ba.x, ba.y, ba.mass, ra, me.x, me.y, mass())) {
             // Eaten: the bot gets what was still undigested and part of the body.
             const int64_t keep = chunks * kKeepPct / 100;
             ba.mass += me.stomach + (chunks - keep) * p.chunk; ra = radius(ba.mass);
@@ -302,7 +309,7 @@ std::string Game::step(int input, const std::vector<int64_t>& digests) {
         while (me.stomach >= p.chunk * (int64_t)(queue.size() + 1) && chunks + (int64_t)queue.size() < p.chunksNeeded())
             queue.push_back({tick, h});
     }
-    if (!over && me.body >= p.goal && tick >= p.minTicks) { over = true; won = true; why = "goal"; }
+    if (!over && !p.endless && me.body >= p.goal && tick >= p.minTicks) { over = true; won = true; why = "goal"; }
     if (!over && tick >= p.maxTicks) { over = true; why = "time"; }
     return "";
 }
@@ -370,6 +377,12 @@ json replay(const std::string& seedHex, const Params& p, const Record& rec, std:
         if (!err.empty()) return {{"ok", false}, {"reason", err}};
     }
     if (ii != rec.inputs.size() || di != rec.digests.size()) return {{"ok", false}, {"reason", "entries after the end"}};
+    if (p.endless) {
+        // Any honest ending counts (eaten, the clock, or giving up); the score is the size at the end.
+        if (digested) *digested = g.allDigested;
+        return {{"ok", true}, {"reason", ""}, {"endless", true}, {"score", g.me.body}, {"ended", g.over ? g.why : "quit"},
+                {"ticks", g.tick}, {"body", g.me.body}, {"chunks", g.chunks}, {"deaths", g.deaths}, {"hash", g.stateHash()}};
+    }
     if (!g.won) return {{"ok", false}, {"reason", g.over ? ("lost: " + g.why) : "goal not reached"}, {"ticks", g.tick}, {"body", g.me.body}};
     if (digested) *digested = g.allDigested;
     return {{"ok", true}, {"reason", ""}, {"ticks", g.tick}, {"body", g.me.body}, {"chunks", g.chunks}, {"deaths", g.deaths}, {"hash", g.stateHash()}};

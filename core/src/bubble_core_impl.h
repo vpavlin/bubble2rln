@@ -56,6 +56,18 @@ public:
     // The claim's state: {"ok", "state": "" | "asking" | "granted" | "refused" | "failed", "result"}.
     std::string claimStatus(const std::string& gameId);
 
+    // Endless mode (newGame {"mode":"endless"}, once this Basecamp has an RLN membership): ends the
+    // game now; its score is the size reached. -> {"ok"}
+    std::string finish(const std::string& gameId);
+
+    // Posts a finished, checked endless game's score on Logos Delivery (signed, with its record, so
+    // every receiver can replay it). -> {"ok", "id", "score"} or {"ok": false, "error"}
+    std::string publishScore(const std::string& gameId);
+
+    // The leaderboard: every received score that checked out. -> {"ok", "status", "entries": [{"rank",
+    // "score", "ticks", "ended", "when", "mine"}] (top 20), "count", "myBest", "pending", "checked", "refused"}
+    std::string leaderboard();
+
     // What the player's Basecamp waits on before a claim can land, read in the background (cheap to poll):
     // {"ok", "wallet": {"state": checking|unavailable|pending|ready|failed, "detail", "synced"?, "head"?,
     // "percent"?, "blocksPerSecond"?, "etaSeconds"?}, "membership": {"state"?, "leaf"?}, "text"}.

@@ -64,12 +64,19 @@ Item {
     property var claim: ({ state: "", result: null })   // claimStatus's reply: "" | asking | granted | refused | failed
     property bool claimable: false      // the game is seeded from a LEZ block (newGame's reply)
     readonly property bool playing: root.screen === "play" || root.screen === "checking"
+    // Endless mode (after a claim): no goal, the game ends when you are eaten (or Esc), and the score
+    // can be posted to the leaderboard on Logos Delivery.
+    property bool endless: false
+    property var scores: ({})                                // leaderboard()'s reply
+    property var posted: ({ state: "", result: null })        // publishScore: "" | posting | done | failed
+    readonly property bool canEndless: !!(root.rln.membership && root.rln.membership.state === "active")
     readonly property bool activeNow: Qt.application.state === Qt.ApplicationActive && root.visible
 
-    function startGame() {
+    function startGame(endless) {
         root.screen = "starting"; root.message = ""; root.fr = null; root.claim = { state: "", result: null }
+        root.endless = !!endless; root.posted = { state: "", result: null }
         root._buf = []; root._clock = 0; root._arriveMs = 0; root.boostKey = false
-        callVia("newGame", ["{}"], function (raw) {
+        callVia("newGame", [root.endless ? "{\"mode\":\"endless\"}" : "{}"], function (raw) {
             var r = root.parse(raw)
             if (!r || !r.ok) { root.screen = "start"; root.message = (r && r.error) || "bubble_core did not answer."; return }
             root.info = r
@@ -109,9 +116,27 @@ Item {
 
     function giveUp() {
         if (!root.info || root.screen !== "play") return
+        if (root.endless) { callVia("finish", [root.info.gameId], null); return }   // ends here; the score counts
         callVia("abandon", [root.info.gameId], null)
         root.screen = "over"; root.message = "You gave up."
     }
+    function publishScore() {
+        if (!root.info) return
+        root.posted = { state: "posting", result: null }
+        callVia("publishScore", [root.info.gameId], function (raw) {
+            const r = root.parse(raw)
+            root.posted = r && r.ok ? { state: "done", result: r } : { state: "failed", result: { error: r && r.error ? r.error : "bubble_core did not answer" } }
+            root.pollBoard()
+        })
+    }
+    function pollBoard() {
+        callVia("leaderboard", [], function (raw) {
+            const r = root.parse(raw)
+            if (r && r.ok) root.scores = r
+        })
+    }
+    Timer { interval: 5000; repeat: true; triggeredOnStart: true; onTriggered: root.pollBoard()
+        running: (root.screen === "start" || root.screen === "scored") && root.activeNow && (root.canEndless || root.screen === "scored") }
 
     // Where to head, in px from the middle of the view.
     function steer() {
@@ -157,11 +182,11 @@ Item {
             root.fr = f
             board.requestPaint()
             if (f.over && root.screen === "play") {
-                if (f.won) root.screen = "checking"
+                if (f.won || root.endless) root.screen = "checking"
                 else { root.screen = "over"; root.message = f.why === "time" ? "Out of time." : ("The game stopped: " + f.why) }
             }
             if (root.screen === "checking" && f.check && f.check.state === "done") {
-                root.screen = f.check.result && f.check.result.ok ? "won" : "over"
+                root.screen = f.check.result && f.check.result.ok ? (root.endless ? "scored" : "won") : "over"
                 if (!(f.check.result && f.check.result.ok)) root.message = "The check refused the game: " + ((f.check.result && f.check.result.reason) || "no reason given")
             }
         })
@@ -303,8 +328,8 @@ Item {
             spacing: 6
             readonly property var me: root.fr ? root.fr.me : null
             readonly property var proofs: root.fr ? root.fr.proofs : null
-            Text { color: root.cText; font.pixelSize: 15; font.bold: true; text: hud.me ? ("Size " + hud.me.body + " / " + hud.me.goal) : "" }
-            Rectangle { Layout.fillWidth: true; height: 8; radius: 4; color: root.cRaised
+            Text { color: root.cText; font.pixelSize: 15; font.bold: true; text: hud.me ? (hud.me.endless ? ("Score " + hud.me.body + "  ·  endless") : ("Size " + hud.me.body + " / " + hud.me.goal)) : "" }
+            Rectangle { Layout.fillWidth: true; height: 8; radius: 4; color: root.cRaised; visible: !(hud.me && hud.me.endless)
                 Rectangle { height: parent.height; radius: 4; color: root.cAccent
                     width: hud.me ? parent.width * Math.min(1, (hud.me.body - hud.me.start) / (hud.me.goal - hud.me.start)) : 0 } }
             Text { color: root.cSub; font.pixelSize: 13
@@ -318,8 +343,8 @@ Item {
             Text { color: root.cSub; font.pixelSize: 13; visible: hud.me && hud.me.slowedBy > 0
                 text: hud.me ? ("Full stomach: " + hud.me.slowedBy + " % slower") : "" }
             Text { color: root.cSub; font.pixelSize: 13
-                text: hud.proofs ? ("Digestion proofs: " + hud.proofs.found + " / " + hud.proofs.need + (hud.proofs.found < hud.proofs.need ? "  ·  " + Math.round(hud.proofs.hashRate) + " hashes/s" : "")) : "" }
-            Rectangle { Layout.fillWidth: true; height: 6; radius: 3; color: root.cRaised
+                text: hud.proofs ? ("Digestion proofs: " + hud.proofs.found + (root.endless ? "" : " / " + hud.proofs.need) + (root.endless || hud.proofs.found < hud.proofs.need ? "  ·  " + Math.round(hud.proofs.hashRate) + " hashes/s" : "")) : "" }
+            Rectangle { Layout.fillWidth: true; height: 6; radius: 3; color: root.cRaised; visible: !root.endless
                 Rectangle { height: parent.height; radius: 3; color: root.cOk; width: hud.proofs ? parent.width * Math.min(1, hud.proofs.found / hud.proofs.need) : 0 } }
             Text { color: root.cFaint; font.pixelSize: 12
                 text: root.fr ? ((root.fr.me.shield && root.fr.me.deaths > 0 ? "Eaten! You lost your stomach and half of your size.  ·  " : "")
@@ -332,7 +357,7 @@ Item {
         visible: root.screen === "play"
         anchors { right: parent.right; top: parent.top; margins: 16 }
         color: root.cFaint; font.pixelSize: 12
-        text: "Steer with the mouse (further = faster) or the arrow keys · Space boosts · Esc gives up"
+        text: "Steer with the mouse (further = faster) or the arrow keys · Space boosts · Esc " + (root.endless ? "ends the game (your score counts)" : "gives up")
     }
 
     // ── cards: start, checking, won, over
@@ -341,7 +366,9 @@ Item {
         anchors.fill: parent
         color: root.screen === "start" || root.screen === "starting" ? root.cBg : "#a0101014"
         Rectangle {
+            id: cardBox
             anchors.centerIn: parent
+            anchors.horizontalCenterOffset: boardPanel.visible && parent.width > 940 ? -150 : 0
             width: Math.min(560, parent.width - 48); height: card.implicitHeight + 48; radius: 14
             color: root.cSurface; border.color: root.cLine
             ColumnLayout {
@@ -349,7 +376,8 @@ Item {
                 anchors { fill: parent; margins: 24 }
                 spacing: 14
                 Text { Layout.fillWidth: true; color: root.cText; font.pixelSize: 26; font.bold: true; wrapMode: Text.Wrap
-                    text: root.screen === "won" ? "You made it!" : root.screen === "over" ? "Game over" : root.screen === "checking" ? "Checking your game…" : "Bubble" }
+                    text: root.screen === "scored" ? ("Score " + (root.fr && root.fr.check && root.fr.check.result ? root.fr.check.result.score : ""))
+                        : root.screen === "won" ? "You made it!" : root.screen === "over" ? "Game over" : root.screen === "checking" ? "Checking your game…" : "Bubble" }
                 Text {
                     Layout.fillWidth: true; color: root.cSub; font.pixelSize: 14; wrapMode: Text.Wrap; textFormat: Text.StyledText
                     visible: root.screen === "start" || root.screen === "starting"
@@ -372,6 +400,29 @@ Item {
                     readonly property var r: root.fr && root.fr.check ? root.fr.check.result : null
                     text: r ? ("Size " + r.body + " in " + Math.round(r.ticks / 30) + " s, " + r.chunks + " proofs of work, all checked"
                         + (r.deaths ? (", eaten " + r.deaths + "×") : "") + ".") : ""
+                }
+                // Endless: the result, and posting it to the leaderboard.
+                Text {
+                    Layout.fillWidth: true; color: root.cSub; font.pixelSize: 14; wrapMode: Text.Wrap
+                    visible: root.screen === "scored"
+                    readonly property var r: root.fr && root.fr.check ? root.fr.check.result : null
+                    text: r ? ("Size " + r.score + " after " + Math.round(r.ticks / 30) + " s: " + ({ eaten: "you were eaten", quit: "you ended the game", time: "the clock ran out" })[r.ended]
+                        + ". " + r.chunks + " proofs of work, all checked.") : ""
+                }
+                Text {
+                    Layout.fillWidth: true; font.pixelSize: 14; wrapMode: Text.Wrap; textFormat: Text.StyledText
+                    visible: root.screen === "scored"
+                    readonly property var p: root.posted
+                    color: p.state === "done" ? root.cOk : p.state === "failed" ? root.cBad : root.cSub
+                    text: p.state === "" ? "Post it to the <b>leaderboard</b>: the score goes out on Logos Messaging with your game's record, signed, and every Bubble that receives it replays the game before listing it."
+                        : p.state === "posting" ? "Posting…"
+                        : p.state === "done" ? ("Posted. It reaches the others' boards in a moment" + (root.scores.status && root.scores.status !== "online" ? " (" + root.scores.status + ")" : "") + ".")
+                        : ("Not posted: " + ((p.result && p.result.error) || "unknown error"))
+                }
+                Text {
+                    Layout.fillWidth: true; color: root.cSub; font.pixelSize: 13; wrapMode: Text.Wrap
+                    visible: root.screen === "start" && root.canEndless
+                    text: "Your Basecamp has an RLN membership, so the endless game is open: no goal, it ends when you're eaten (or Esc), and your size then is your score."
                 }
                 // The claim: the game's proofs go to the gifter, which checks them and registers an RLN membership.
                 Text {
@@ -405,7 +456,8 @@ Item {
                     visible: root.message !== ""
                     text: root.message
                 }
-                RowLayout {
+                Flow {
+                    Layout.fillWidth: true
                     spacing: 10
                     LogosButton {
                         visible: root.screen === "won" && root.claimable && root.claim.state !== "granted"
@@ -414,11 +466,55 @@ Item {
                         onClicked: root.claimMembership()
                     }
                     LogosButton {
-                        text: root.screen === "starting" ? "Starting…" : (root.screen === "start" ? "Play" : "Play again")
+                        visible: root.screen === "scored" && (root.posted.state === "" || root.posted.state === "failed")
+                        text: "Post score"
+                        onClicked: root.publishScore()
+                    }
+                    LogosButton {
+                        visible: root.canEndless && root.screen !== "checking"
+                        text: root.screen === "scored" ? "Play endless again" : "Play endless"
+                        enabled: root.screen !== "starting"
+                        onClicked: root.startGame(true)
+                    }
+                    LogosButton {
+                        text: root.screen === "starting" ? "Starting…" : (root.screen === "start" ? "Play" : (root.endless ? "Play for a membership" : "Play again"))
                         enabled: root.screen !== "starting" && root.screen !== "checking"
-                        onClicked: root.startGame()
+                        onClicked: root.startGame(false)
                     }
                 }
+            }
+        }
+        // The leaderboard: scores posted on Logos Messaging, each replayed and checked by this Bubble.
+        Rectangle {
+            id: boardPanel
+            visible: (root.screen === "start" && root.canEndless) || root.screen === "scored"
+            anchors { verticalCenter: parent.verticalCenter; left: cardBox.right; leftMargin: 16 }
+            width: 270; height: boardCol.implicitHeight + 32; radius: 14
+            color: root.cSurface; border.color: root.cLine
+            ColumnLayout {
+                id: boardCol
+                anchors { fill: parent; margins: 16 }
+                spacing: 6
+                Text { color: root.cText; font.pixelSize: 16; font.bold: true; text: "Leaderboard" }
+                Text { Layout.fillWidth: true; color: root.cFaint; font.pixelSize: 11; wrapMode: Text.Wrap
+                    text: (root.scores.count || 0) + " checked score" + ((root.scores.count || 0) === 1 ? "" : "s")
+                        + (root.scores.status && root.scores.status !== "online" ? "  ·  " + root.scores.status : "")
+                        + (root.scores.pending ? "  ·  checking " + root.scores.pending : "") }
+                Repeater {
+                    model: root.scores.entries || []
+                    delegate: RowLayout {
+                        required property var modelData
+                        Layout.fillWidth: true; spacing: 8
+                        visible: modelData.rank <= 12
+                        Text { Layout.preferredWidth: 28; color: root.cFaint; font.pixelSize: 13; text: "#" + modelData.rank }
+                        Text { Layout.preferredWidth: 60; color: modelData.mine ? root.cAccent : root.cText; font.pixelSize: 14; font.bold: true; text: modelData.score }
+                        Text { Layout.fillWidth: true; color: root.cSub; font.pixelSize: 12
+                            text: Math.round(modelData.ticks / 30) + " s" + (modelData.mine ? "  ·  you" : "") }
+                    }
+                }
+                Text { visible: !(root.scores.entries && root.scores.entries.length); color: root.cSub; font.pixelSize: 13; text: "No scores yet. Be the first." }
+                Text { visible: !!root.scores.myBest && root.scores.myBest.rank > 12; color: root.cAccent; font.pixelSize: 13
+                    text: root.scores.myBest ? ("You: #" + root.scores.myBest.rank + " with " + root.scores.myBest.score) : "" }
             }
         }
     }

@@ -2,15 +2,16 @@
   "name": "bubble_core",
   "display_name": "Bubble Core",
   "icon": "icon.png",
-  "version": "0.3.8",
+  "version": "0.4.0",
   "type": "core",
   "interface": "universal",
   "category": "games",
-  "description": "Grow your bubble, digest with proof of work, and claim an RLN membership: the game itself (rules, loop, record), the digestion workers and the check of a finished game",
+  "description": "Grow your bubble, digest with proof of work, claim an RLN membership, then play endless games for a leaderboard posted on Logos Delivery: the game itself (rules, loop, record), the digestion workers, the check of a finished game and the score checks",
   "main": "bubble_core_plugin",
   "dependencies": [
     "liblogos_lez_rln_module",
-    "liblogos_rln_module"
+    "liblogos_rln_module",
+    "delivery_module"
   ],
   "nix": {
     "packages": {

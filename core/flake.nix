@@ -10,6 +10,8 @@
     # The RLN keystore (the player's identity; the delegated claim goes through it). Delivery uses the
     # same module, so the membership backs Chat too; without Chat nothing else would load it. 0.12.0.
     liblogos_rln_module.url = "github:logos-co/logos-rln-modules/d9f8b3d5ff93f6fd6fb363f5689098c07e81ac47?dir=logos-rln-module";
+    # Logos Delivery (the leaderboard's scores are posted and received on it). The version Chat uses.
+    delivery_module.url = "github:logos-co/logos-delivery-module/v0.3.3";
   };
 
   outputs = inputs@{ logos-module-builder, ... }:

@@ -27,6 +27,8 @@ logos_module(
         src/claim.cpp
         src/beacon.h
         src/beacon.cpp
+        src/score.h
+        src/score.cpp
     INCLUDE_DIRS src
 )
 
