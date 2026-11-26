@@ -65,7 +65,7 @@ public:
     std::string publishScore(const std::string& gameId);
 
     // The leaderboard: every received score that checked out. -> {"ok", "status", "entries": [{"rank",
-    // "score", "ticks", "ended", "when", "mine"}] (top 20), "count", "myBest", "pending", "checked", "refused", "nickname"}; entries carry "name"
+    // "score", "ticks", "ended", "when", "mine"}] (top 20), "count", "myBest", "pending", "checked", "refused", "nickname", "loading"}; entries carry "name"
     std::string leaderboard();
 
     // The name this player posts scores under (kept across restarts, in this instance's data).

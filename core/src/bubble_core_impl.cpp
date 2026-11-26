@@ -286,6 +286,7 @@ struct ScoreBoard {
     std::string status = "starting";            // starting | joining | online | error: …
     std::string persist;
     int64_t lastRepostMs = 0, checked = 0, refused = 0;
+    int64_t upAtMs = 0, received = 0;           // when Delivery came up; messages handled since
     bool up = false, dirty = false;
     std::atomic<bool> stop{false};
     std::thread worker;
@@ -305,6 +306,7 @@ struct BubbleCorePrivate {
     // rlnStatus: a watcher thread that reads the player's RLN wallet and membership while someone asks.
     std::mutex rwMu;
     json rwLast;                       // the last reading, served as is
+    bool memberSeen = false;           // an active membership was read once: it stays (a later failed read doesn't take it away)
     int64_t rwAskedMs = 0;             // the watcher reads while this is under a minute old
     std::thread rwThread;
     std::atomic<bool> rwStop{false};
@@ -371,7 +373,7 @@ std::string BubbleCoreImpl::newGame(const std::string& optionsJson) {
     if (endless) {
         // Endless games open once this Basecamp has an RLN membership: their scores are posted with it.
         const json r = lastRln(d);
-        const bool member = r.is_object() && r.value("membership", json::object()).value("state", std::string()) == "active";
+        const bool member = r.is_object() && (r.value("membership", json::object()).value("state", std::string()) == "active" || r.value("memberSeen", false));
         const char* any = std::getenv("BUBBLE_ENDLESS_ANY");
         if (!member && !(any && *any)) {
             g->shutdown();
@@ -751,7 +753,12 @@ static void ensureRlnWatch(BubbleCorePrivate* d) {
             { std::lock_guard<std::mutex> l(d->rwMu); asked = d->rwAskedMs; }
             if (nowMs() - asked > 60000) { std::this_thread::sleep_for(std::chrono::milliseconds(250)); continue; }
             json j = readRln(d, r);
-            { std::lock_guard<std::mutex> l(d->rwMu); d->rwLast = j; }
+            {
+                std::lock_guard<std::mutex> l(d->rwMu);
+                if (j.value("membership", json::object()).value("state", std::string()) == "active") d->memberSeen = true;
+                j["memberSeen"] = d->memberSeen;
+                d->rwLast = j;
+            }
             for (int i = 0; i < 12 && !d->rwStop; i++) std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }
     });
@@ -876,6 +883,7 @@ bool boardUp(ScoreBoard* b) {
     std::lock_guard<std::mutex> l(b->m);
     b->status = "online";
     b->up = true;
+    if (!b->upAtMs) b->upAtMs = nowMs();
     return true;
 }
 
@@ -925,6 +933,7 @@ void boardRun(ScoreBoard* b) {
             }
         }
         if (have) {
+            { std::lock_guard<std::mutex> l(b->m); b->received++; }
             json msg = json::parse(item.second.begin(), item.second.end(), nullptr, false);
             json v;
             try { v = verifyScore(msg, lookup); } catch (const std::exception& e) { v = {{"ok", false}, {"reason", e.what()}}; }
@@ -1357,7 +1366,10 @@ std::string BubbleCoreImpl::leaderboard() {
     }
     return json{{"ok", true}, {"status", b->status}, {"entries", top}, {"count", (int64_t)all.size()},
                 {"myBest", myBest}, {"pending", (int64_t)(b->inbox.size() + b->outbox.size())},
-                {"checked", b->checked}, {"refused", b->refused}, {"nickname", nick}}.dump();
+                {"checked", b->checked}, {"refused", b->refused}, {"nickname", nick},
+                // Loading: Delivery isn't up yet, or it is and the Store's history hasn't come in yet
+                // (nothing arrived and less than 45 s since subscribing; on testnet it takes ~30 s).
+                {"loading", !b->up || (b->received == 0 && nowMs() - b->upAtMs < 45000)}}.dump();
 }
 
 std::string BubbleCoreImpl::nickname() {

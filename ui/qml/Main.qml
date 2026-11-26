@@ -77,7 +77,8 @@ Item {
     property string nickname: ""                             // the name scores go out under (kept by the core)
     property bool nameLoaded: false
     property var posted: ({ state: "", result: null })        // publishScore: "" | posting | done | failed
-    readonly property bool canEndless: !!(root.rln.membership && root.rln.membership.state === "active")
+    // memberSeen: the core read an active membership once (a later failed read doesn't close endless mode).
+    readonly property bool canEndless: !!((root.rln.membership && root.rln.membership.state === "active") || root.rln.memberSeen)
     readonly property bool activeNow: Qt.application.state === Qt.ApplicationActive && root.visible
 
     function startGame(endless) {
@@ -89,6 +90,7 @@ Item {
             var r = root.parse(raw)
             if (!r || !r.ok) { root.screen = "start"; root.message = (r && r.error) || "bubble_core did not answer."; return }
             root.info = r
+            root.endless = r.mode === "endless"   // the core decides what game this is
             root.claimable = !!r.claimable
             root.screen = "play"
             root.forceActiveFocus()
@@ -121,11 +123,17 @@ Item {
         })
     }
     Timer { interval: 3000; repeat: true; triggeredOnStart: true; onTriggered: root.pollRln()
-        running: (root.screen === "start" || root.screen === "won") && root.activeNow }
+        running: (root.screen === "start" || root.screen === "won" || root.screen === "over" || root.screen === "scored") && root.activeNow }
 
     function giveUp() {
         if (!root.info || root.screen !== "play") return
-        if (root.endless) { callVia("finish", [root.info.gameId], null); return }   // ends here; the score counts
+        if (root.endless || (root.fr && root.fr.me && root.fr.me.endless)) {   // ends here; the score counts
+            callVia("finish", [root.info.gameId], function (raw) {
+                const r = root.parse(raw)
+                if (!(r && r.ok)) root.message = "Couldn't end the game: " + ((r && r.error) || "bubble_core did not answer")
+            })
+            return
+        }
         callVia("abandon", [root.info.gameId], null)
         root.screen = "over"; root.message = "You gave up."
     }
@@ -211,6 +219,7 @@ Item {
             if (now - root._fpsSince >= 1000) { root.fps = Math.round(root._frames * 1000 / (now - root._fpsSince)); root._frames = 0; root._fpsSince = now }
             root.fr = f
             board.requestPaint()
+            if (f.me && f.me.endless) root.endless = true
             if (f.over && root.screen === "play") {
                 if (f.won || root.endless) root.screen = "checking"
                 else { root.screen = "over"; root.message = f.why === "time" ? "Out of time." : ("The game stopped: " + f.why) }
@@ -570,7 +579,8 @@ Item {
             spacing: boardPanel.compact ? 3 : 6
             Text { color: root.cText; font.pixelSize: boardPanel.compact ? 14 : 16; font.bold: true; text: "Leaderboard" }
             Text { Layout.fillWidth: true; color: root.cFaint; font.pixelSize: 11; wrapMode: Text.Wrap
-                text: (root.scores.count || 0) + " checked score" + ((root.scores.count || 0) === 1 ? "" : "s")
+                text: (root.scores.ok === undefined || root.scores.loading ? "Loading…  ·  " : "")
+                    + (root.scores.count || 0) + " checked score" + ((root.scores.count || 0) === 1 ? "" : "s")
                     + (root.scores.status && root.scores.status !== "online" ? "  ·  " + root.scores.status : "")
                     + (root.scores.pending ? "  ·  checking " + root.scores.pending : "") }
             Repeater {
@@ -587,8 +597,9 @@ Item {
                         text: (modelData.name ? modelData.name : "anonymous") + (boardPanel.compact ? "" : "  ·  " + Math.round(modelData.ticks / 30) + " s") }
                 }
             }
-            Text { visible: !(root.scores.entries && root.scores.entries.length); color: root.cSub; font.pixelSize: 13
-                text: root.canEndless ? "No scores yet. Be the first." : "No scores yet." }
+            Text { visible: !(root.scores.entries && root.scores.entries.length); color: root.cSub; font.pixelSize: 13; Layout.fillWidth: true; wrapMode: Text.Wrap
+                text: root.scores.ok === undefined || root.scores.loading ? "Loading scores from Logos Messaging…"
+                    : root.canEndless ? "No scores yet. Be the first." : "No scores yet." }
             Text { visible: !!root.scores.myBest && root.scores.myBest.rank > boardPanel.rows; color: root.cAccent; font.pixelSize: 13
                 textFormat: Text.PlainText
                 text: root.scores.myBest ? ("You: #" + root.scores.myBest.rank + " with " + root.scores.myBest.score) : "" }
