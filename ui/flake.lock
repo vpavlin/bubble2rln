@@ -11,18 +11,18 @@
       },
       "locked": {
         "dir": "core",
-        "lastModified": 1795682488,
-        "narHash": "sha256-ENLodnDBtWpR8q6iUtQnRnNYYdijO2HFeca2r3SiA0M=",
+        "lastModified": 1795685010,
+        "narHash": "sha256-AJ2NghV7RpUdR4RL1LnXVIVNAs9rMhxSrsFACZ/6xPg=",
         "owner": "vpavlin",
         "repo": "bubble2rln",
-        "rev": "3650aba057dc2460df487d60f2385b8198a6f4fc",
+        "rev": "345ea12c76bf69e42392c2ac515fa4ed5b1ee333",
         "type": "github"
       },
       "original": {
         "dir": "core",
         "owner": "vpavlin",
         "repo": "bubble2rln",
-        "rev": "3650aba057dc2460df487d60f2385b8198a6f4fc",
+        "rev": "345ea12c76bf69e42392c2ac515fa4ed5b1ee333",
         "type": "github"
       }
     },
