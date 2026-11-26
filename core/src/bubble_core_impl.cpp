@@ -310,6 +310,9 @@ struct BubbleCorePrivate {
     std::atomic<bool> rwStop{false};
     std::string persistPath;           // this module's own data dir: the wallet lives in a sibling's
     std::shared_ptr<ScoreBoard> board;   // the endless-mode leaderboard, started on first use
+    std::mutex nickMu;
+    std::string nick;                    // the name scores are posted under (scores/profile.json)
+    bool nickLoaded = false;
 };
 
 BubbleCoreImpl::BubbleCoreImpl() : d(new BubbleCorePrivate) {
@@ -929,8 +932,14 @@ void boardRun(ScoreBoard* b) {
             if (v.value("ok", false)) {
                 const std::string id = v["id"];
                 const bool isMine = b->mine.count(id) > 0;
-                json e = {{"id", id}, {"score", v["score"]}, {"ticks", v["ticks"]}, {"ended", v["ended"]}, {"when", v["when"]}, {"mine", isMine}};
-                if (!b->entries.count(id)) { b->entries[id] = e; b->dirty = true; boardTrim(b); }
+                json e = {{"id", id}, {"score", v["score"]}, {"ticks", v["ticks"]}, {"ended", v["ended"]}, {"when", v["when"]},
+                          {"name", v.value("name", std::string())}, {"mine", isMine}};
+                auto it = b->entries.find(id);
+                if (it == b->entries.end()) { b->entries[id] = e; b->dirty = true; boardTrim(b); }
+                else if (v.value("when", (int64_t)0) > it->second.value("when", (int64_t)0)) {
+                    // The same game posted again (only its own key can sign that): a newer name wins.
+                    it->second["name"] = e["name"]; it->second["when"] = e["when"]; b->dirty = true;
+                }
                 b->checked++;
             } else {
                 b->refused++;
@@ -970,6 +979,24 @@ void boardRun(ScoreBoard* b) {
 }
 
 }  // namespace
+
+static std::string nickFile(const std::string& persistRoot) {
+    return persistRoot.empty() ? std::string() : (std::filesystem::path(persistRoot) / "scores" / "profile.json").string();
+}
+
+static std::string loadNick(BubbleCorePrivate* d, const std::string& persistRoot) {
+    std::lock_guard<std::mutex> l(d->nickMu);
+    if (!d->nickLoaded) {
+        d->nickLoaded = true;
+        const std::string f = nickFile(persistRoot);
+        if (!f.empty()) {
+            std::ifstream in(f);
+            json j = json::parse(in, nullptr, false);
+            if (j.is_object() && j.contains("name") && j["name"].is_string()) d->nick = cleanName(j["name"].get<std::string>());
+        }
+    }
+    return d->nick;
+}
 
 static std::shared_ptr<ScoreBoard> ensureBoard(BubbleCorePrivate* d, const std::string& persistRoot) {
     if (d->board) return d->board;
@@ -1281,6 +1308,7 @@ std::string BubbleCoreImpl::publishScore(const std::string& gameId) {
     auto g = d->live;
     if (!g || g->id != gameId) return json{{"ok", false}, {"error", "no such game"}}.dump();
     json msg, res;
+    const std::string name = loadNick(d, instancePersistencePath());
     {
         std::lock_guard<std::mutex> l(g->m);
         if (!g->params.endless) return json{{"ok", false}, {"error", "only endless games have scores"}}.dump();
@@ -1289,7 +1317,7 @@ std::string BubbleCoreImpl::publishScore(const std::string& gameId) {
             return json{{"ok", false}, {"error", "the game isn't over and checked yet"}}.dump();
         res = g->checkResult;
         msg = makeScore(g->beacon, g->pk, g->sk, g->rec, res.value("score", (int64_t)0), res.value("ticks", (int64_t)0),
-                        res.value("ended", std::string()), wallMs());
+                        res.value("ended", std::string()), wallMs(), name);
     }
     if (msg.dump().size() > kScoreMaxBytes) return json{{"ok", false}, {"error", "this game is too long to post in one message"}}.dump();
     // The id a receiver will compute (score.h), so this score is known as ours on the board.
@@ -1301,7 +1329,8 @@ std::string BubbleCoreImpl::publishScore(const std::string& gameId) {
     {
         std::lock_guard<std::mutex> l(b->m);
         b->mine[id] = {{"id", id}, {"score", v["score"]}, {"msg", msg}};
-        b->entries[id] = {{"id", id}, {"score", v["score"]}, {"ticks", v["ticks"]}, {"ended", v["ended"]}, {"when", v["when"]}, {"mine", true}};
+        b->entries[id] = {{"id", id}, {"score", v["score"]}, {"ticks", v["ticks"]}, {"ended", v["ended"]}, {"when", v["when"]},
+                         {"name", v.value("name", std::string())}, {"mine", true}};
         b->outbox.push_back(msg);
         b->dirty = true;
     }
@@ -1310,6 +1339,7 @@ std::string BubbleCoreImpl::publishScore(const std::string& gameId) {
 }
 
 std::string BubbleCoreImpl::leaderboard() {
+    const std::string nick = loadNick(d, instancePersistencePath());
     auto b = ensureBoard(d, instancePersistencePath());
     std::lock_guard<std::mutex> l(b->m);
     std::vector<json> all;
@@ -1327,7 +1357,29 @@ std::string BubbleCoreImpl::leaderboard() {
     }
     return json{{"ok", true}, {"status", b->status}, {"entries", top}, {"count", (int64_t)all.size()},
                 {"myBest", myBest}, {"pending", (int64_t)(b->inbox.size() + b->outbox.size())},
-                {"checked", b->checked}, {"refused", b->refused}}.dump();
+                {"checked", b->checked}, {"refused", b->refused}, {"nickname", nick}}.dump();
+}
+
+std::string BubbleCoreImpl::nickname() {
+    return json{{"ok", true}, {"name", loadNick(d, instancePersistencePath())}}.dump();
+}
+
+std::string BubbleCoreImpl::setNickname(const std::string& raw) {
+    const std::string root = instancePersistencePath();
+    loadNick(d, root);
+    const std::string name = cleanName(raw);
+    std::lock_guard<std::mutex> l(d->nickMu);
+    d->nick = name;
+    const std::string f = nickFile(root);
+    if (!f.empty()) {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        fs::create_directories(fs::path(f).parent_path(), ec);
+        { std::ofstream o(f + ".tmp"); o << json{{"name", name}}.dump(); }
+        fs::rename(f + ".tmp", f, ec);
+        if (ec) return json{{"ok", false}, {"error", "couldn't save the name: " + ec.message()}, {"name", name}}.dump();
+    }
+    return json{{"ok", true}, {"name", name}}.dump();
 }
 
 std::string BubbleCoreImpl::claimStatus(const std::string& gameId) {

@@ -20,7 +20,8 @@
 namespace bubble {
 
 constexpr const char* kScoreTopic = "/bubble/1/scores/json";
-constexpr int kScoreMsgVersion = 1;
+constexpr int kScoreMsgVersion = 2;   // 2 adds the player's name (signed); 1 is still accepted
+constexpr size_t kNameMaxChars = 24;
 constexpr size_t kScoreMaxBytes = 120 * 1024;   // a message, base64 included (Delivery caps ~150 KiB)
 
 // The rules every score is checked against: the endless defaults and the default proof of work,
@@ -35,11 +36,17 @@ bool decodeRecordBin(const std::vector<unsigned char>& b, Record& out, std::stri
 std::string toBase64(const std::vector<unsigned char>& b);
 bool fromBase64(const std::string& s, std::vector<unsigned char>& out);
 
-// A signed score message for a finished, checked endless game.
-nlohmann::json makeScore(const Beacon& beacon, const unsigned char pk[32], const unsigned char sk[64],
-                         const Record& rec, int64_t score, int64_t ticks, const std::string& ended, int64_t whenMs);
+// A player's name as it may be posted: valid UTF-8, no control characters, trimmed, at most
+// kNameMaxChars characters (longer is cut). Anything goes otherwise; it's a nickname, not an identity.
+std::string cleanName(const std::string& raw);
 
-// Checks a received score message: {"ok", "reason", "score", "ticks", "ended", "id", "when"}.
+// A signed score message for a finished, checked endless game. The name is signed with the rest,
+// so nobody passing the message on can change it.
+nlohmann::json makeScore(const Beacon& beacon, const unsigned char pk[32], const unsigned char sk[64],
+                         const Record& rec, int64_t score, int64_t ticks, const std::string& ended, int64_t whenMs,
+                         const std::string& name = "");
+
+// Checks a received score message: {"ok", "reason", "score", "ticks", "ended", "id", "when", "name"}.
 // id identifies the game (stable across republishing), for deduplication.
 // pow: the proof-of-work rules (scorePow() everywhere but tests).
 nlohmann::json verifyScore(const nlohmann::json& msg, const BeaconLookup& lookup, const PowParams& pow = scorePow());

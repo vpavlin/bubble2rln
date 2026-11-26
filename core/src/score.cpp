@@ -45,10 +45,11 @@ bool unhex(const std::string& h, unsigned char* out, size_t n) {
 void sha256(const std::vector<unsigned char>& b, unsigned char out[32]) { crypto_hash_sha256(out, b.data(), b.size()); }
 
 // What the game key signs: the block, the key, the result and the record.
-void scoreDigest(const Beacon& bc, const unsigned char pub[32], int64_t score, int64_t ticks, const std::string& ended,
-                 int64_t whenMs, const unsigned char recHash[32], unsigned char out[32]) {
+// Version 2 adds the name at the end (and its own domain, so a v1 signature can't pass as v2).
+void scoreDigest(int version, const Beacon& bc, const unsigned char pub[32], int64_t score, int64_t ticks, const std::string& ended,
+                 int64_t whenMs, const unsigned char recHash[32], const std::string& name, unsigned char out[32]) {
     std::vector<unsigned char> m;
-    const std::string dom = "bubble-score/v1";
+    const std::string dom = version == 1 ? "bubble-score/v1" : "bubble-score/v2";
     m.insert(m.end(), dom.begin(), dom.end());
     for (int i = 0; i < 8; i++) m.push_back((unsigned char)(bc.id >> (8 * i)));
     m.insert(m.end(), bc.hash, bc.hash + 32);
@@ -58,10 +59,47 @@ void scoreDigest(const Beacon& bc, const unsigned char pub[32], int64_t score, i
     putVar(m, ended.size());
     m.insert(m.end(), ended.begin(), ended.end());
     m.insert(m.end(), recHash, recHash + 32);
+    if (version >= 2) { putVar(m, name.size()); m.insert(m.end(), name.begin(), name.end()); }
     sha256(m, out);
 }
 
 }  // namespace
+
+std::string cleanName(const std::string& raw) {
+    // Decode UTF-8, keep printable code points (no C0/C1 controls, no bidi overrides), squash spaces.
+    std::vector<uint32_t> cps;
+    size_t i = 0;
+    while (i < raw.size()) {
+        const unsigned char c = raw[i];
+        uint32_t cp; int len;
+        if (c < 0x80) { cp = c; len = 1; }
+        else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; len = 2; }
+        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; len = 3; }
+        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; len = 4; }
+        else { i++; continue; }
+        if (i + len > raw.size()) break;
+        bool ok = true;
+        for (int k = 1; k < len; k++) { const unsigned char cc = raw[i + k]; if ((cc & 0xC0) != 0x80) { ok = false; break; } cp = (cp << 6) | (cc & 0x3F); }
+        if (!ok) { i++; continue; }
+        i += len;
+        static const uint32_t minFor[5] = {0, 0, 0x80, 0x800, 0x10000};
+        if (cp < minFor[len] || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) continue;   // overlong / surrogate
+        if (cp < 0x20 || (cp >= 0x7F && cp < 0xA0)) cp = ' ';
+        if ((cp >= 0x200B && cp <= 0x200F) || (cp >= 0x202A && cp <= 0x202E) || (cp >= 0x2066 && cp <= 0x2069) || cp == 0xFEFF) continue;
+        if (cp == ' ' && (cps.empty() || cps.back() == ' ')) continue;
+        cps.push_back(cp);
+    }
+    while (!cps.empty() && cps.back() == ' ') cps.pop_back();
+    if (cps.size() > kNameMaxChars) { cps.resize(kNameMaxChars); while (!cps.empty() && cps.back() == ' ') cps.pop_back(); }
+    std::string out;
+    for (uint32_t cp : cps) {
+        if (cp < 0x80) out += (char)cp;
+        else if (cp < 0x800) { out += (char)(0xC0 | (cp >> 6)); out += (char)(0x80 | (cp & 0x3F)); }
+        else if (cp < 0x10000) { out += (char)(0xE0 | (cp >> 12)); out += (char)(0x80 | ((cp >> 6) & 0x3F)); out += (char)(0x80 | (cp & 0x3F)); }
+        else { out += (char)(0xF0 | (cp >> 18)); out += (char)(0x80 | ((cp >> 12) & 0x3F)); out += (char)(0x80 | ((cp >> 6) & 0x3F)); out += (char)(0x80 | (cp & 0x3F)); }
+    }
+    return out;
+}
 
 std::vector<unsigned char> encodeRecordBin(const Record& r) {
     std::vector<unsigned char> b = {'B', 'R', 1};
@@ -127,21 +165,31 @@ bool fromBase64(const std::string& s, std::vector<unsigned char>& out) {
 }
 
 json makeScore(const Beacon& beacon, const unsigned char pk[32], const unsigned char sk[64],
-               const Record& rec, int64_t score, int64_t ticks, const std::string& ended, int64_t whenMs) {
+               const Record& rec, int64_t score, int64_t ticks, const std::string& ended, int64_t whenMs,
+               const std::string& rawName) {
+    const std::string name = cleanName(rawName);
     const std::vector<unsigned char> bin = encodeRecordBin(rec);
     unsigned char rh[32], dg[32], sig[64];
     sha256(bin, rh);
-    scoreDigest(beacon, pk, score, ticks, ended, whenMs, rh, dg);
+    scoreDigest(kScoreMsgVersion, beacon, pk, score, ticks, ended, whenMs, rh, name, dg);
     crypto_sign_detached(sig, nullptr, dg, 32, sk);
     return {{"t", "bubble-score"}, {"v", kScoreMsgVersion}, {"rules", kSimVersion},
             {"beacon", {{"id", beacon.id}, {"hash", hexOf(beacon.hash, 32)}, {"ts", beacon.tsMs}}},
-            {"pub", hexOf(pk, 32)}, {"score", score}, {"ticks", ticks}, {"ended", ended}, {"when", whenMs},
+            {"pub", hexOf(pk, 32)}, {"name", name}, {"score", score}, {"ticks", ticks}, {"ended", ended}, {"when", whenMs},
             {"rec", toBase64(bin)}, {"sig", hexOf(sig, 64)}};
 }
 
 json verifyScore(const json& m, const BeaconLookup& lookup, const PowParams& pow) {
     auto refuse = [](const std::string& why) { return json{{"ok", false}, {"reason", why}}; };
-    if (!m.is_object() || m.value("t", std::string()) != "bubble-score" || m.value("v", 0) != kScoreMsgVersion) return refuse("not a score message");
+    if (!m.is_object() || m.value("t", std::string()) != "bubble-score") return refuse("not a score message");
+    const int version = m.contains("v") && m["v"].is_number_integer() ? m["v"].get<int>() : 0;
+    if (version != 1 && version != 2) return refuse("not a score message (version " + std::to_string(version) + ")");
+    std::string name;
+    if (version >= 2) {
+        if (!m.contains("name") || !m["name"].is_string()) return refuse("bad name");
+        name = m["name"].get<std::string>();
+        if (cleanName(name) != name) return refuse("bad name");
+    }
     if (m.value("rules", 0) != kSimVersion) return refuse("played with other rules (" + std::to_string(m.value("rules", 0)) + ")");
     const json& bj = m.value("beacon", json());
     if (!bj.is_object() || !bj.contains("id") || !bj["id"].is_number_unsigned() || !bj.contains("ts") || !bj["ts"].is_number_integer())
@@ -162,7 +210,7 @@ json verifyScore(const json& m, const BeaconLookup& lookup, const PowParams& pow
         return refuse("bad record");
     unsigned char rh[32], dg[32];
     sha256(bin, rh);
-    scoreDigest(claimed, pub, score, ticks, ended, when, rh, dg);
+    scoreDigest(version, claimed, pub, score, ticks, ended, when, rh, name, dg);
     if (crypto_sign_verify_detached(sig, dg, 32, pub) != 0) return refuse("signature verification failed");
     // The block must be the chain's, so the seed can't be chosen.
     Beacon chain;
@@ -183,7 +231,7 @@ json verifyScore(const json& m, const BeaconLookup& lookup, const PowParams& pow
     std::vector<unsigned char> idIn(pub, pub + 32);
     idIn.insert(idIn.end(), rh, rh + 32);
     sha256(idIn, idh);
-    return {{"ok", true}, {"reason", ""}, {"score", score}, {"ticks", ticks}, {"ended", ended}, {"when", when},
+    return {{"ok", true}, {"reason", ""}, {"score", score}, {"ticks", ticks}, {"ended", ended}, {"when", when}, {"name", name},
             {"id", hexOf(idh, 8)}, {"block", claimed.id}};
 }
 

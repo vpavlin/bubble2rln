@@ -267,10 +267,16 @@ int main(int argc, char** argv) {
             }
             rec2.end = g2.tick;
             const std::string ended = g2.over ? g2.why : "quit";
-            json msg = makeScore(bc, pk, sk, rec2, g2.me.body, g2.tick, ended, 1234);
+            json msg = makeScore(bc, pk, sk, rec2, g2.me.body, g2.tick, ended, 1234, "  Bubbl\xc3\xa9\x01 \xe2\x80\xae Queen of the very long names  ");
             BeaconLookup look = [&](uint64_t id, Beacon& out, std::string& w, bool& un) { un = false; if (id != bc.id) { w = "unknown"; return false; } out = bc; return true; };
             json v = verifyScore(msg, look, pw);
             CHECK(v.value("ok", false) && v.value("score", -1) == g2.me.body, "score refused: %s", v.dump().c_str());
+            CHECK(v.value("name", std::string()) == "Bubbl\xc3\xa9 Queen of the very", "name not cleaned: [%s]", v.value("name", std::string()).c_str());
+            json mn = msg; mn["name"] = "someone else";
+            CHECK(!verifyScore(mn, look, pw).value("ok", true), "changed name accepted");
+            json mb = msg; mb["name"] = "a\nb";
+            CHECK(!verifyScore(mb, look, pw).value("ok", true), "uncleaned name accepted");
+            CHECK(cleanName("\xff\xc0\xafok") == "ok", "bad UTF-8 kept: %s", cleanName("\xff\xc0\xafok").c_str());
             json m2 = msg; m2["score"] = g2.me.body + 50;
             CHECK(!verifyScore(m2, look, pw).value("ok", true), "inflated score accepted");
             json m3 = msg; m3["beacon"]["hash"] = std::string(64, '8');

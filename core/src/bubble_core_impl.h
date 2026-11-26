@@ -65,8 +65,14 @@ public:
     std::string publishScore(const std::string& gameId);
 
     // The leaderboard: every received score that checked out. -> {"ok", "status", "entries": [{"rank",
-    // "score", "ticks", "ended", "when", "mine"}] (top 20), "count", "myBest", "pending", "checked", "refused"}
+    // "score", "ticks", "ended", "when", "mine"}] (top 20), "count", "myBest", "pending", "checked", "refused", "nickname"}; entries carry "name"
     std::string leaderboard();
+
+    // The name this player posts scores under (kept across restarts, in this instance's data).
+    // setNickname cleans it (score.h cleanName: up to 24 characters, no control characters) and
+    // returns what was kept. -> {"ok", "name"}
+    std::string nickname();
+    std::string setNickname(const std::string& name);
 
     // What the player's Basecamp waits on before a claim can land, read in the background (cheap to poll):
     // {"ok", "wallet": {"state": checking|unavailable|pending|ready|failed, "detail", "synced"?, "head"?,
