@@ -141,8 +141,16 @@ Item {
             if (r && r.ok) root.scores = r
         })
     }
-    Timer { interval: 5000; repeat: true; triggeredOnStart: true; onTriggered: root.pollBoard()
-        running: (root.screen === "start" || root.screen === "scored") && root.activeNow && (root.canEndless || root.screen === "scored") }
+    // The leaderboard is always on screen: every 5 s between games, every 15 s while playing.
+    Timer { interval: root.screen === "play" ? 15000 : 5000; repeat: true; triggeredOnStart: true; onTriggered: root.pollBoard()
+        running: root.activeNow }
+    // Where a score would rank on the board right now (the endless HUD shows it live).
+    function rankFor(score) {
+        var e = root.scores.entries || [], n = 1
+        for (var i = 0; i < e.length; i++) if (e[i].score >= score && !e[i].mine) n++
+        return n
+    }
+    readonly property bool boardBeside: root.width >= 760
 
     // Where to head, in px from the middle of the view.
     function steer() {
@@ -390,8 +398,8 @@ Item {
         Rectangle {
             id: cardBox
             anchors.centerIn: parent
-            anchors.horizontalCenterOffset: boardPanel.visible && parent.width > 940 ? -150 : 0
-            width: Math.min(560, parent.width - 48); height: card.implicitHeight + 48; radius: 14
+            anchors.horizontalCenterOffset: root.boardBeside ? -143 : 0
+            width: Math.min(560, parent.width - 48 - (root.boardBeside ? 286 : 0)); height: card.implicitHeight + 48; radius: 14
             color: root.cSurface; border.color: root.cLine
             ColumnLayout {
                 id: card
@@ -514,38 +522,49 @@ Item {
                 }
             }
         }
-        // The leaderboard: scores posted on Logos Messaging, each replayed and checked by this Bubble.
-        Rectangle {
-            id: boardPanel
-            visible: (root.screen === "start" && root.canEndless) || root.screen === "scored"
-            anchors { verticalCenter: parent.verticalCenter; left: cardBox.right; leftMargin: 16 }
-            width: 270; height: boardCol.implicitHeight + 32; radius: 14
-            color: root.cSurface; border.color: root.cLine
-            ColumnLayout {
-                id: boardCol
-                anchors { fill: parent; margins: 16 }
-                spacing: 6
-                Text { color: root.cText; font.pixelSize: 16; font.bold: true; text: "Leaderboard" }
-                Text { Layout.fillWidth: true; color: root.cFaint; font.pixelSize: 11; wrapMode: Text.Wrap
-                    text: (root.scores.count || 0) + " checked score" + ((root.scores.count || 0) === 1 ? "" : "s")
-                        + (root.scores.status && root.scores.status !== "online" ? "  ·  " + root.scores.status : "")
-                        + (root.scores.pending ? "  ·  checking " + root.scores.pending : "") }
-                Repeater {
-                    model: root.scores.entries || []
-                    delegate: RowLayout {
-                        required property var modelData
-                        Layout.fillWidth: true; spacing: 8
-                        visible: modelData.rank <= 12
-                        Text { Layout.preferredWidth: 28; color: root.cFaint; font.pixelSize: 13; text: "#" + modelData.rank }
-                        Text { Layout.preferredWidth: 60; color: modelData.mine ? root.cAccent : root.cText; font.pixelSize: 14; font.bold: true; text: modelData.score }
-                        Text { Layout.fillWidth: true; color: root.cSub; font.pixelSize: 12
-                            text: Math.round(modelData.ticks / 30) + " s" + (modelData.mine ? "  ·  you" : "") }
-                    }
+
+    }
+
+    // ── the leaderboard, on every screen: scores posted on Logos Messaging, each replayed and
+    // checked by this Bubble. Beside the card between games; small in the corner while playing
+    // (or when the window is too narrow for both).
+    Rectangle {
+        id: boardPanel
+        readonly property bool compact: root.screen === "play" || !root.boardBeside
+        readonly property int rows: compact ? 5 : 12
+        x: compact ? parent.width - width - 16 : parent.width / 2 - 143 + cardBox.width / 2 + 16
+        y: compact ? 40 : (parent.height - height) / 2
+        width: compact ? 220 : 270; height: boardCol.implicitHeight + (compact ? 20 : 32); radius: compact ? 10 : 14
+        color: root.cSurface; border.color: root.cLine; opacity: compact ? 0.92 : 1
+        ColumnLayout {
+            id: boardCol
+            anchors { fill: parent; margins: boardPanel.compact ? 10 : 16 }
+            spacing: boardPanel.compact ? 3 : 6
+            Text { color: root.cText; font.pixelSize: boardPanel.compact ? 14 : 16; font.bold: true; text: "Leaderboard" }
+            Text { Layout.fillWidth: true; color: root.cFaint; font.pixelSize: 11; wrapMode: Text.Wrap
+                text: (root.scores.count || 0) + " checked score" + ((root.scores.count || 0) === 1 ? "" : "s")
+                    + (root.scores.status && root.scores.status !== "online" ? "  ·  " + root.scores.status : "")
+                    + (root.scores.pending ? "  ·  checking " + root.scores.pending : "") }
+            Repeater {
+                model: root.scores.entries || []
+                delegate: RowLayout {
+                    required property var modelData
+                    Layout.fillWidth: true; spacing: 8
+                    visible: modelData.rank <= boardPanel.rows
+                    Text { Layout.preferredWidth: 28; color: root.cFaint; font.pixelSize: 13; text: "#" + modelData.rank }
+                    Text { Layout.preferredWidth: 56; color: modelData.mine ? root.cAccent : root.cText; font.pixelSize: 14; font.bold: true; text: modelData.score }
+                    Text { Layout.fillWidth: true; color: root.cSub; font.pixelSize: 12
+                        text: Math.round(modelData.ticks / 30) + " s" + (modelData.mine ? "  ·  you" : "") }
                 }
-                Text { visible: !(root.scores.entries && root.scores.entries.length); color: root.cSub; font.pixelSize: 13; text: "No scores yet. Be the first." }
-                Text { visible: !!root.scores.myBest && root.scores.myBest.rank > 12; color: root.cAccent; font.pixelSize: 13
-                    text: root.scores.myBest ? ("You: #" + root.scores.myBest.rank + " with " + root.scores.myBest.score) : "" }
             }
+            Text { visible: !(root.scores.entries && root.scores.entries.length); color: root.cSub; font.pixelSize: 13
+                text: root.canEndless ? "No scores yet. Be the first." : "No scores yet." }
+            Text { visible: !!root.scores.myBest && root.scores.myBest.rank > boardPanel.rows; color: root.cAccent; font.pixelSize: 13
+                text: root.scores.myBest ? ("You: #" + root.scores.myBest.rank + " with " + root.scores.myBest.score) : "" }
+            Text { visible: root.screen === "play" && root.endless && !!root.fr; color: root.cAccent; font.pixelSize: 13; font.bold: true
+                text: root.fr ? ("Now: " + root.fr.me.body + " would be #" + root.rankFor(root.fr.me.body)) : "" }
+            Text { visible: !boardPanel.compact && !root.canEndless; Layout.fillWidth: true; color: root.cFaint; font.pixelSize: 11; wrapMode: Text.Wrap
+                text: "Win a game to claim a membership, then play endless and post your score here." }
         }
     }
 }
