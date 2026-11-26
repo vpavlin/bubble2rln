@@ -2,7 +2,7 @@
   "name": "bubble",
   "display_name": "Bubble",
   "icon": "icon.png",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "type": "ui_qml",
   "category": "games",
   "description": "Grow from a small bubble by eating smaller ones; digest with proof of work; reach the goal to claim an RLN membership for Logos Messaging",

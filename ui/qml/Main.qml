@@ -74,11 +74,14 @@ Item {
         if (!root.paused) { root._buf = []; root._clock = 0; root._arriveMs = 0 }   // pick the picture up afresh
     }
     property var scores: ({})                                // leaderboard()'s reply
+    property string nickname: ""                             // the name scores go out under (kept by the core)
+    property bool nameLoaded: false
     property var posted: ({ state: "", result: null })        // publishScore: "" | posting | done | failed
     readonly property bool canEndless: !!(root.rln.membership && root.rln.membership.state === "active")
     readonly property bool activeNow: Qt.application.state === Qt.ApplicationActive && root.visible
 
     function startGame(endless) {
+        root.forceActiveFocus()   // keys to the game, even after typing a name
         root.screen = "starting"; root.message = ""; root.fr = null; root.claim = { state: "", result: null }
         root.endless = !!endless; root.posted = { state: "", result: null }; root.paused = false
         root._buf = []; root._clock = 0; root._arriveMs = 0; root.boostKey = false
@@ -129,7 +132,17 @@ Item {
     function publishScore() {
         if (!root.info) return
         root.posted = { state: "posting", result: null }
-        callVia("publishScore", [root.info.gameId], function (raw) {
+        root.forceActiveFocus()   // keys back to the game (P, Esc) after typing the name
+        const gameId = root.info.gameId
+        // The name first (the core keeps it for next time and signs it into the post).
+        callVia("setNickname", [nameField.text], function (rawName) {
+            const n = root.parse(rawName)
+            if (n && n.ok) { root.nickname = n.name; nameField.text = n.name }
+            root.postNow(gameId)
+        })
+    }
+    function postNow(gameId) {
+        callVia("publishScore", [gameId], function (raw) {
             const r = root.parse(raw)
             root.posted = r && r.ok ? { state: "done", result: r } : { state: "failed", result: { error: r && r.error ? r.error : "bubble_core did not answer" } }
             root.pollBoard()
@@ -138,7 +151,10 @@ Item {
     function pollBoard() {
         callVia("leaderboard", [], function (raw) {
             const r = root.parse(raw)
-            if (r && r.ok) root.scores = r
+            if (r && r.ok) {
+                root.scores = r
+                if (r.nickname !== undefined && !root.nameLoaded) { root.nickname = r.nickname; nameField.text = r.nickname; root.nameLoaded = true }
+            }
         })
     }
     // The leaderboard is always on screen: every 5 s between games, every 15 s while playing.
@@ -489,6 +505,18 @@ Item {
                     Rectangle { Layout.fillWidth: true; height: 6; radius: 3; color: root.cRaised; visible: parent.w.percent !== undefined && parent.w.state === "pending" && !parent.w.staleSequencer
                         Rectangle { height: parent.height; radius: 3; color: root.cAccent; width: parent.width * Math.min(1, (parent.parent.w.percent || 0) / 100) } }
                 }
+                RowLayout {
+                    Layout.fillWidth: true; spacing: 10
+                    visible: root.screen === "scored" && (root.posted.state === "" || root.posted.state === "failed")
+                    Text { color: root.cSub; font.pixelSize: 14; text: "Your name" }
+                    LogosTextField {
+                        id: nameField
+                        Layout.fillWidth: true
+                        placeholderText: "anything you like, up to 24 characters"
+                        textInput.maximumLength: 24
+                        textInput.onAccepted: root.publishScore()
+                    }
+                }
                 Text {
                     Layout.fillWidth: true; color: root.screen === "over" ? root.cSub : root.cBad; font.pixelSize: 14; wrapMode: Text.Wrap
                     visible: root.message !== ""
@@ -552,14 +580,17 @@ Item {
                     Layout.fillWidth: true; spacing: 8
                     visible: modelData.rank <= boardPanel.rows
                     Text { Layout.preferredWidth: 28; color: root.cFaint; font.pixelSize: 13; text: "#" + modelData.rank }
-                    Text { Layout.preferredWidth: 56; color: modelData.mine ? root.cAccent : root.cText; font.pixelSize: 14; font.bold: true; text: modelData.score }
-                    Text { Layout.fillWidth: true; color: root.cSub; font.pixelSize: 12
-                        text: Math.round(modelData.ticks / 30) + " s" + (modelData.mine ? "  ·  you" : "") }
+                    Text { Layout.preferredWidth: 44; color: modelData.mine ? root.cAccent : root.cText; font.pixelSize: 14; font.bold: true; text: modelData.score }
+                    // Names are whatever players typed: plain text only, cut to the row.
+                    Text { Layout.fillWidth: true; color: modelData.mine ? root.cAccent : root.cSub; font.pixelSize: 12
+                        textFormat: Text.PlainText; elide: Text.ElideRight; maximumLineCount: 1
+                        text: (modelData.name ? modelData.name : "anonymous") + (boardPanel.compact ? "" : "  ·  " + Math.round(modelData.ticks / 30) + " s") }
                 }
             }
             Text { visible: !(root.scores.entries && root.scores.entries.length); color: root.cSub; font.pixelSize: 13
                 text: root.canEndless ? "No scores yet. Be the first." : "No scores yet." }
             Text { visible: !!root.scores.myBest && root.scores.myBest.rank > boardPanel.rows; color: root.cAccent; font.pixelSize: 13
+                textFormat: Text.PlainText
                 text: root.scores.myBest ? ("You: #" + root.scores.myBest.rank + " with " + root.scores.myBest.score) : "" }
             Text { visible: root.screen === "play" && root.endless && !!root.fr; color: root.cAccent; font.pixelSize: 13; font.bold: true
                 text: root.fr ? ("Now: " + root.fr.me.body + " would be #" + root.rankFor(root.fr.me.body)) : "" }
